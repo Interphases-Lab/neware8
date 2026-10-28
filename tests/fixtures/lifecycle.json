@@ -1,0 +1,38 @@
+{
+  "source_sha256": "d2ce6c51f201a268298671a7e49901986377dd91d28455f2078fcb4e4bf4905f",
+  "transform": "DevID anonymized to 7; checksum recomputed; remaining bytes unchanged",
+  "events": [
+    {
+      "timestamp": 1789060595.6062484,
+      "raw_hex": "ffffffffffffffff07011700110100000000000000315a"
+    },
+    {
+      "timestamp": 1789060595.6081164,
+      "raw_hex": "ffffffffffffffff0701180091000100000000000000b25a"
+    },
+    {
+      "timestamp": 1789060613.0187526,
+      "raw_hex": "ffffffffffffffff07011700140100000000000000345a"
+    },
+    {
+      "timestamp": 1789060613.0255692,
+      "raw_hex": "ffffffffffffffff0701180094000100000000000000b55a"
+    },
+    {
+      "timestamp": 1789060622.5122466,
+      "raw_hex": "ffffffffffffffff07011700110100000000000000315a"
+    },
+    {
+      "timestamp": 1789060622.5144467,
+      "raw_hex": "ffffffffffffffff0701180091000100000000000000b25a"
+    },
+    {
+      "timestamp": 1789060637.0738797,
+      "raw_hex": "ffffffffffffffff070119007f08000100000000000000a95a"
+    },
+    {
+      "timestamp": 1789060637.0779793,
+      "raw_hex": "ffffffffffffffff07011a00ff0008800100000000000000aa5a"
+    }
+  ]
+}

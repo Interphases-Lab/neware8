@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <config type="Step File" version="18" client_version="BTSDA BTS Client 8.0.1.492(2025.01.23)(2025.01.23)(R3)" date="20260910184502" Guid="4c9214bb-34a9-4225-b100-925023b1c599">
+    <Head_Info>
+      <Operate Value="66" />
+      <Scale Value="1" />
+      <Start_Step Value="1" Hide_Ctrl_Step="0" />
+      <Creator Value="aurora-unicycler" />
+      <PN Value="2026-09-10 18-44-27" />
+      <Remark Value="DRAFT resistor CC-CV review" />
+      <RateType Value="103" />
+    </Head_Info>
+    <Step_Info Num="3">
+      <Step1 Step_ID="1" Step_Type="1">
+        <Record>
+          <Main>
+            <Time Value="1000" />
+            <Volt Value="100" />
+          </Main>
+        </Record>
+        <Limit>
+          <Main>
+            <Curr Value="6" />
+            <Time Value="2000" />
+            <Stop_Volt Value="500" />
+          </Main>
+        </Limit>
+        <Protect>
+          <Main>
+            <Volt>
+              <Upper Value="1000" />
+              <Lower Value="-1000" />
+            </Volt>
+            <Curr>
+              <Upper Value="8" />
+              <Lower Value="-8" />
+            </Curr>
+          </Main>
+        </Protect>
+      </Step1>
+      <Step2 Step_ID="2" Step_Type="3">
+        <Record>
+          <Main>
+            <Time Value="1000" />
+            <Volt Value="100" />
+          </Main>
+        </Record>
+        <Limit>
+          <Main>
+            <Curr Value="6" />
+            <Volt Value="500" />
+            <Time Value="10000" />
+            <Stop_Curr Value="0.1" />
+          </Main>
+        </Limit>
+        <Protect>
+          <Main>
+            <Volt>
+              <Upper Value="1000" />
+              <Lower Value="-1000" />
+            </Volt>
+            <Curr>
+              <Upper Value="8" />
+              <Lower Value="-8" />
+            </Curr>
+          </Main>
+        </Protect>
+      </Step2>
+      <Step3 Step_ID="3" Step_Type="6">
+      </Step3>
+    </Step_Info>
+    <SMBUS>
+      <SMBUS_Info Num="0" AdjacentInterval="0" />
+    </SMBUS>
+  </config>
+</root>

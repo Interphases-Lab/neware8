@@ -1,0 +1,143 @@
+{
+  "source_sha256": "51a061135a44c2d083ece35a600d8e463f8004262f4cb7bd6953b4b74ab67fdc",
+  "native": {
+    "evidence": "known layout and field names; layout confirmed in captures",
+    "steps": [
+      {
+        "index": 1,
+        "step_id": 1,
+        "step_type": 1,
+        "maps_raw": [
+          2231886085,
+          0
+        ],
+        "fields": {
+          "current": {
+            "operator_raw": 6,
+            "value_raw": 60000
+          },
+          "time_ms": {
+            "operator_raw": 4,
+            "value_raw": 2000
+          },
+          "cutoff_voltage": {
+            "operator_raw": 4,
+            "value_raw": 500
+          },
+          "operate": {
+            "value_raw": 66
+          },
+          "rate_type": {
+            "value_raw": 103
+          },
+          "protection_voltage_upper": {
+            "operator_raw": 4,
+            "value_raw": 1000
+          },
+          "protection_voltage_lower": {
+            "operator_raw": 6,
+            "value_raw": -1000
+          },
+          "protection_current_upper": {
+            "operator_raw": 4,
+            "value_raw": 80000
+          },
+          "protection_current_lower": {
+            "operator_raw": 5,
+            "value_raw": -80000
+          },
+          "record_time_ms": {
+            "operator_raw": 4,
+            "value_raw": 1000
+          },
+          "record_voltage": {
+            "operator_raw": 4,
+            "value_raw": 100
+          }
+        },
+        "trailer_raw": 1,
+        "raw_hex": "4f000100010105e10785000000000660ea000004d00700000000000004f4010000420000006700000004e80300000618fcffff04803801000580c7feff04e803000000000000046400000001000000"
+      },
+      {
+        "index": 2,
+        "step_id": 2,
+        "step_type": 3,
+        "maps_raw": [
+          2231885959,
+          0
+        ],
+        "fields": {
+          "current": {
+            "operator_raw": 6,
+            "value_raw": 60000
+          },
+          "voltage": {
+            "operator_raw": 4,
+            "value_raw": 500
+          },
+          "time_ms": {
+            "operator_raw": 4,
+            "value_raw": 10000
+          },
+          "cutoff_current": {
+            "operator_raw": 6,
+            "value_raw": 1000
+          },
+          "operate": {
+            "value_raw": 66
+          },
+          "rate_type": {
+            "value_raw": 103
+          },
+          "protection_voltage_upper": {
+            "operator_raw": 4,
+            "value_raw": 1000
+          },
+          "protection_voltage_lower": {
+            "operator_raw": 6,
+            "value_raw": -1000
+          },
+          "protection_current_upper": {
+            "operator_raw": 4,
+            "value_raw": 80000
+          },
+          "protection_current_lower": {
+            "operator_raw": 5,
+            "value_raw": -80000
+          },
+          "record_time_ms": {
+            "operator_raw": 4,
+            "value_raw": 1000
+          },
+          "record_voltage": {
+            "operator_raw": 4,
+            "value_raw": 100
+          }
+        },
+        "trailer_raw": 1,
+        "raw_hex": "54000200020387e00785000000000660ea000004f401000004102700000000000006e8030000420000006700000004e80300000618fcffff04803801000580c7feff04e803000000000000046400000001000000"
+      },
+      {
+        "index": 3,
+        "step_id": 3,
+        "step_type": 6,
+        "maps_raw": [
+          2147508224,
+          0
+        ],
+        "fields": {
+          "operate": {
+            "value_raw": 66
+          },
+          "rate_type": {
+            "value_raw": 103
+          }
+        },
+        "trailer_raw": 1,
+        "raw_hex": "1a00030003060060008000000000420000006700000001000000"
+      }
+    ],
+    "raw_hex": "4f000100010105e10785000000000660ea000004d00700000000000004f4010000420000006700000004e80300000618fcffff04803801000580c7feff04e80300000000000004640000000100000054000200020387e00785000000000660ea000004f401000004102700000000000006e8030000420000006700000004e80300000618fcffff04803801000580c7feff04e8030000000000000464000000010000001a00030003060060008000000000420000006700000001000000",
+    "ready_for_transmission": false
+  }
+}

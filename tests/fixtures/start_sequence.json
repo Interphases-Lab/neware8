@@ -1,0 +1,90 @@
+{
+  "capture_sha256": "ed911c2fe1151323dd1335bb0e0fa9b89321c76b6fc4cfe51af465bbb06db0ae",
+  "transform": "Endpoints anonymized; DevID->7; all present GUIDs->00..0f; additive checksums recomputed. Other payload bytes unchanged.",
+  "events": [
+    {
+      "timestamp": 1789053490.8042128,
+      "source": "server",
+      "target": "controller",
+      "raw_hex": "ffffffffffffffff0701250073000102030405060708090a0b0c0d0e0f0100010100001b5a"
+    },
+    {
+      "timestamp": 1789053490.8683546,
+      "source": "controller",
+      "target": "server",
+      "raw_hex": "ffffffffffffffff07012000f300000102030405060708090a0b0c0d0e0f935a"
+    },
+    {
+      "timestamp": 1789053490.895815,
+      "source": "server",
+      "target": "controller",
+      "raw_hex": "ffffffffffffffff0701150039000000000000565a"
+    },
+    {
+      "timestamp": 1789053490.8993013,
+      "source": "controller",
+      "target": "server",
+      "raw_hex": "ffffffffffffffff07011000b900d15a"
+    },
+    {
+      "timestamp": 1789053490.908344,
+      "source": "server",
+      "target": "controller",
+      "raw_hex": "ffffffffffffffff0701c4017f3600000102030405060708090a0b0c0d0e0f01010100000094010000080002010036000100010105600085000000000610270000041027000000000000420000006700000004e803000000000000046400000001000000360002000201056000850000000006204e0000041027000000000000420000006700000004e803000000000000046400000001000000360003000301056000850000000006409c0000041027000000000000420000006700000004e80300000000000004640000000100000036000400040205600085000000000410270000041027000000000000420000006700000004e803000000000000046400000001000000360005000502056000850000000004204e0000041027000000000000420000006700000004e803000000000000046400000001000000360006000602056000850000000004409c0000041027000000000000420000006700000004e803000000000000046400000001000000360007000701056000850000000006102700000460ea000000000000420000006700000004e8030000000000000464000000010000001a000800080600600080000000004200000067000000010000008d5a"
+    },
+    {
+      "timestamp": 1789053490.933489,
+      "source": "controller",
+      "target": "server",
+      "raw_hex": "ffffffffffffffff07012b00ff003680000102030405060708090a0b0c0d0e0f010101000000020100665a"
+    },
+    {
+      "timestamp": 1789053490.9441943,
+      "source": "server",
+      "target": "controller",
+      "raw_hex": "ffffffffffffffff070133007f5400000102030405060708090a0b0c0d0e0f01010100000008000000000000001cdf4421f15a"
+    },
+    {
+      "timestamp": 1789053490.950349,
+      "source": "controller",
+      "target": "server",
+      "raw_hex": "ffffffffffffffff07012800ff005480000102030405060708090a0b0c0d0e0f0101010000007e5a"
+    },
+    {
+      "timestamp": 1789053490.9706225,
+      "source": "server",
+      "target": "controller",
+      "raw_hex": "ffffffffffffffff07001e007f3d000900000000040000004a604049215a"
+    },
+    {
+      "timestamp": 1789053490.9782457,
+      "source": "controller",
+      "target": "server",
+      "raw_hex": "ffffffffffffffff07001200ff003d80d55a"
+    },
+    {
+      "timestamp": 1789053490.9896486,
+      "source": "server",
+      "target": "controller",
+      "raw_hex": "ffffffffffffffff070128007f3c00000102030405060708090a0b0c0d0e0f01010100000001675a"
+    },
+    {
+      "timestamp": 1789053490.9979148,
+      "source": "controller",
+      "target": "server",
+      "raw_hex": "ffffffffffffffff07012a00ff003c80000102030405060708090a0b0c0d0e0f01000101f22000a8225a"
+    },
+    {
+      "timestamp": 1789053491.0109613,
+      "source": "server",
+      "target": "controller",
+      "raw_hex": "ffffffffffffffff070129007f3a00000102030405060708090a0b0c0d0e0f01000101f22000a81f5a"
+    },
+    {
+      "timestamp": 1789053491.021762,
+      "source": "controller",
+      "target": "server",
+      "raw_hex": "ffffffffffffffff07012700ff003a80000102030405060708090a0b0c0d0e0f0100010100635a"
+    }
+  ]
+}

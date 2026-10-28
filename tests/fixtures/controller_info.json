@@ -1,0 +1,14 @@
+{
+  "source_sha256": "be4e73c65a22dc5b14dfffca1d57c6809dbc4345adc2a6f964eb7f84e282241e",
+  "source_lines": {
+    "controller_version": 7,
+    "unit_version": 10,
+    "rtc_status": 52
+  },
+  "transformation": "route=0102030405060708, device=7, lower-unit=21; checksum recomputed; payload unchanged",
+  "frames": {
+    "controller_version": "010203040506070807fe3200d60034535f322e31352e362e305f32303232303531375f3039353731380001b003ffff1fdb5a",
+    "unit_version": "010203040506070807152e00d5004d30343331303130365f3232313131345f3131313534315f464433463100a45a",
+    "rtc_status": "010203040506070807001300ff00248001be5a"
+  }
+}

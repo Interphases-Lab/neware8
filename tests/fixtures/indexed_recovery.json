@@ -1,0 +1,15 @@
+{
+  "evidence": "known layouts; synthetic identifiers and payloads; hardware behavior unconfirmed",
+  "identity": [
+    "01 02 03 04 05 06 07 08",
+    7
+  ],
+  "index": 305419896,
+  "minimum_request": "0102030405060708070011007f0f00a65a",
+  "resend_request": "0102030405060708070015007f100078563412bf5a",
+  "minimum_reply": "010203040506070807fe1600ff000f8078563412bd5a",
+  "resend_reply": "010203040506070807fe1200ff001080a65a",
+  "identity_request": "0102030405060708070011007f2a00c15a",
+  "identity_reply": "010203040506070807fe4600ff002a80000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233225a",
+  "fixture_notes": "Synthetic route and device identifiers. Request unit 0; illustrative response unit FE. Identity payload 00..33 is synthetic. Checksums cover the device byte through the payload."
+}
