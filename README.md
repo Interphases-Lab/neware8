@@ -120,9 +120,10 @@ replacement. Late history is accepted during the grace period; history
 received after finalization fails explicitly without modifying the archive.
 
 On reconnect, a fresh controller identity and matching channel TestID are
-required before recording resumes. Stored writes are never replayed. Explicit
-`resume_history()` requests retransmission from the saved stream token when
-needed; the controller's retention limits and final completeness remain unknown.
+required before recording resumes. Stored writes are never replayed. History is
+requested again from the saved stream token after every connect, so batches in flight
+during a drop are recovered; `resume_history()` does this explicitly. The controller's
+retention limits and final completeness remain unknown.
 
 ## Documentation
 

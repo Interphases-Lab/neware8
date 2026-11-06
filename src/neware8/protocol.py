@@ -41,8 +41,8 @@ class Short(IntEnum):
 
     CONNECT = 0x00  # controller -> host on connect; body: client type, version
     SET_RTC = 0x03
-    GET_SL_STATUS = 0x04  # BTS70; purpose not established
-    SET_SL_STATUS = 0x05  # BTS70; purpose not established
+    GET_ALARM_SOUND_LIGHT = 0x04  # BTS70 GetSLStatus; simulator: OnCmdGetAlarmSl
+    SET_ALARM_SOUND_LIGHT = 0x05  # BTS70 SetSLStatus; simulator: OnCmdSetAlarmSl
     LIGHTEN = 0x0A  # channel locate light
     STOP = 0x11
     BROADCAST_STOP = 0x12
@@ -55,6 +55,8 @@ class Short(IntEnum):
     UPDATE_CONTROLLER = 0x49  # firmware (UpdateZwj), forbidden
     GET_UNIT_VERSION = 0x55  # GetVerXwj
     GET_CONTROLLER_VERSION = 0x56  # GetVerZwj
+    GET_PLATEAU_VOLTAGE = 0x58  # BGS GetPlatVol; not decoded
+    SET_PLATEAU_VOLTAGE = 0x59  # BGS SetPlatVol; not decoded
     SET_UPLOAD_INTERVAL = 0x5E  # SetRTInterval
     JUMP = 0x6F  # Jump70
     SEND_INFO = 0x72  # controller -> host: channel/range metadata, possibly multipart
@@ -63,19 +65,32 @@ class Short(IntEnum):
 
 
 class Extended(IntEnum):
-    """Two-byte commands (prefix 0x7F). Generation in brackets is the defining packet class."""
+    """Two-byte commands (prefix 0x7F). Generation in brackets is the defining packet class.
+
+    BTS82 accepts the older generations' commands too: both the manufacturer server
+    (CMiddleBTS82 reuses CMiddleBTS80's handlers) and the simulator fall through to them.
+    """
 
     SET_CONTROLLER_RESTART = 0x0006  # [BGS] SetMidReStart, forbidden
     UPDATE_UNIT = 0x0007  # [BTS76] UpdateXWJ firmware, forbidden
     RESET_CHANNEL = 0x0008  # [BTS76] ResetMidChlStatus; the UI's "Clear Flag"
+    DISK_CONTROL = 0x000C  # [BTS78] BonDiskCtrl
     DISK_STATUS = 0x000D  # [BTS78] controller -> host
     GET_HISTORY_MIN_INDEX = 0x000F  # [BTS78] GetDfMinIndex
     RESEND_HISTORY = 0x0010  # [BTS78] SetReSendDfData
     HISTORY = 0x0015  # [BTS79] SendDFData79, controller -> host, ACKed
+    TEST_PING = 0x0016  # [BTS80]
+    TEST_NDA = 0x0017  # [BTS80]
     GET_BACKUP_FILE_INFO = 0x0018  # [BTS79] backup file transfer, forbidden
     GET_BACKUP_FILE = 0x0019  # forbidden
     SEND_BACKUP_FILE = 0x001A  # forbidden
+    SET_TEMPERATURE_BOARD_MAP = 0x001C  # [BTS80] SetTempCtrlBoardMap
+    SET_SIMULATION_DATA = 0x001D  # [BTS80] SetSimData80: simulation-step data; not decoded
+    MOVE = 0x001F  # [BTS80] SetMove: continue a test on another channel; not decoded
+    SPECIAL_CONTINUE = 0x0020  # [BTS80] the client's History Continue; not decoded
+    MODIFY_STEPS = 0x0021  # [BTS80] StepModify: edit a running program; not decoded
     FORWARD_CALIBRATION = 0x0022  # [BTS80] forbidden
+    OCCUPY_UNIT = 0x0023  # [BTS80] OccupyXwj
     GET_RTC_STATUS = 0x0024  # [BTS80]
     SET_RTC_STATUS = 0x0025  # [BTS80]
     HISTORY_STATUS = 0x0027  # [BTS80] DfStatus80, controller -> host: sizes
@@ -83,6 +98,8 @@ class Extended(IntEnum):
     GET_CONTROLLER_SERIAL = 0x002A  # [BTS80] GetZwjSn: GUID, serial number, dates
     GET_UNIT_SERIAL = 0x002B  # [BTS80] GetXwjSn
     BACKUP_DATA = 0x002E  # [BTS81] controller -> host, ACKed with the data flag
+    LIGHTEN_EX = 0x002F  # [BTS81] Lighten81
+    SHELF_CONTROL = 0x0030  # [BTS81] BonCtrl81
     DOWNLOAD_STEPS = 0x0036  # [BTS82] SetStep82
     RESERVE_PAUSE = 0x0037  # [BTS82] ReserveStop82: pause at a step/cycle/time
     GET_RESERVE_PAUSE = 0x0038  # [BTS82] GetReserveStop82
@@ -96,6 +113,7 @@ class Extended(IntEnum):
     CHANNEL_CONTROL = 0x0040  # [BTS82] SendChlCtrl: (channel, ctrl); purpose unknown
     CONTROLLER_STATUS = 0x0041  # [BTS82] ZwjTotalRT, controller -> host: fans, disks
     TFTP_FILE = 0x0042  # [BTS82] forbidden
+    DBC = 0x0043  # [BTS82] simulator OnCmd_DBC
     CALIBRATE = 0x0044  # [BTS82] forbidden
     GET_UNIT_VERSIONS = 0x0045  # [BTS82] GetXwjVerEx
     SET_DBC = 0x0047  # [BTS82] CAN DBC configuration

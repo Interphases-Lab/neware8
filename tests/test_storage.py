@@ -58,9 +58,12 @@ def test_finalized_records_survive_restart_without_native_bytes(tmp_path):
             assert store.finalize(run.id).record_count == 2
             copy = store.export(run.id, tmp_path / "copy.bdf.parquet")
             assert copy.path.read_bytes() == result.path.read_bytes()
-        for sequence in (2, 3):
-            with pytest.raises(StorageError, match="after finalization"):
-                store.append(batch(history_payload(sequence=sequence)), (run.id,))
+        with pytest.raises(StorageError, match="after finalization"):  # inside the gap
+            store.append(batch(history_payload(sequence=2)), (run.id,))
+        # A resend repeats archived records; they are already in the archive.
+        assert store.append(batch(history_payload(sequence=3)), (run.id,)) == ()
+        with pytest.raises(StorageError, match="after finalization"):
+            store.append(batch(history_payload(sequence=4)), (run.id,))
         assert store.get(run.id).record_count == 2
         assert [point.sequence for point in store.read(run.id)] == [1, 3]
         store.clear(PROFILE.address)

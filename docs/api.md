@@ -98,6 +98,21 @@ matching successful ACK, unchanged TestID and no alarm.
 Stop/Continue retain the measurement; Clear Flag changes stopped to finished.
 There is no separate invented Pause command.
 
+Continue resumes a stopped, protected, paused or beeping test on the same channel, as
+the manufacturer client allows; TestID, step, cycle, counters and recording carry on. After
+a protection stop the channel shows an alarm, and Continue requires that code explicitly:
+
+    status = client.snapshot.get(address)
+    await client.control(address, Control.CONTINUE, expected_test_id=status.test_id,
+                         acknowledged_alarm=status.alarm_code)
+
+Only the acknowledged alarm is overridden; a different alarm is refused. If the cause
+persists, the test may run briefly and stop again before a running report arrives. Test
+time only advances while a channel runs, so a later stopped report with more test time is
+a certain outcome: `StateError` names the new alarm and the session stays open. The
+controller restarts the current step's timer on Continue (observed after a Stop).
+Continuing after a protection stop has not yet been tested on hardware.
+
 The library serializes command handshakes, while previously started independent
 channels continue running and recording. It does not make electrically parallel
 channels. Physical isolation of concurrent starts still needs hardware acceptance.
@@ -141,14 +156,23 @@ eligible for recording again; mismatches are marked interrupted and never merged
 Fresh observations are required before further control. Profiles supplied for
 new operations remain explicit.
 
-`await client.resume_history(index=None)` uses the saved opaque native stream
-token verbatim, without adding one. If no token exists, provide an independently
-established index. This is an explicit cursor write, not an automatic reconnect
-action. The first accepted batch must have the requested token, following a
-successful resend ACK. Failure closes the session; no minimum-index fallback is
-attempted. Completion means the first matching batch was durably stored, not that
-all missing records were recovered. `await client.history_minimum_index()` reads the oldest
-position the controller can still resend.
+After every connect, once each owned channel has reported and at least one run matches,
+the client sends the controller its saved history token (`0010`), as the manufacturer
+server does. The controller continues after the last batch it *sent*, so without this the
+batches in flight when the connection dropped would be skipped. Resent records are
+deduplicated. If the controller no longer holds that position, whatever it sends first is
+stored and an error is logged (records in between may be lost). A rejected request is
+logged and recording continues. Within a session, a batch whose token is ahead of the
+previous batch's end is logged as a gap; resent batches are not.
+
+`await client.resume_history(index=None)` sends the same request explicitly, using the
+saved token verbatim or an independently established index. It is strict: the first
+accepted batch must have the requested token, following a successful resend ACK;
+otherwise the session is closed. A rejected request raises `OperationRejected` and keeps
+the session. Completion means the first matching batch was durably stored, not that all
+missing records were recovered. `await client.history_minimum_index()` reads the oldest
+position the controller can still resend (in the simulator, only until a resend position
+has been set).
 
 ## Controller settings
 

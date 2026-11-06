@@ -319,12 +319,24 @@ class HistoryRecord:
         return self.resistance_raw if self.data_flag == RecordKind.EVENT else None
 
 
+HISTORY_FILE_SHIFT = 23  # position: file number above bit 23, byte offset below (simulator)
+
+
 @dataclass(frozen=True)
 class HistoryBatch:
-    """Extended 0x0015. ACK 0x8015 (unit 0) echoes `token`; persist records before ACKing."""
+    """Extended 0x0015. ACK 0x8015 (unit 0) echoes `token`; persist records before ACKing.
 
-    token: int  # position in the controller's history stream
+    `token` is the controller's read position before the first record: consecutive batches
+    are contiguous at 94 bytes per record (observed in every captured session).
+    """
+
+    token: int
     records: tuple[HistoryRecord, ...]
+
+    @property
+    def end_token(self) -> int:
+        """Position of the batch the controller sends next, if nothing is skipped."""
+        return self.token + len(self.records) * HistoryRecord.SIZE
 
     @classmethod
     def from_payload(cls, payload: bytes) -> "HistoryBatch":
@@ -341,6 +353,18 @@ class HistoryBatch:
     @staticmethod
     def ack_payload(token: int) -> bytes:
         return struct.pack("<I", token)
+
+
+def history_gap(expected: int, token: int) -> int | None:
+    """Records between `expected` and a batch at `token`: >0 skipped, <0 resent, None unknown.
+
+    Positions are only comparable within one history file; the controller's file rollover
+    has not been observed.
+    """
+    if expected >> HISTORY_FILE_SHIFT != token >> HISTORY_FILE_SHIFT:
+        return None
+    records, rest = divmod(token - expected, HistoryRecord.SIZE)
+    return None if rest else records
 
 
 # --------------------------------------------------------------------------- #
@@ -581,10 +605,10 @@ class Start:
 
     guid: bytes
     targets: tuple[Target, ...]
-    flag: int = 1
+    start_step: int = 1  # m_btStepID: the step the test starts at (server PDB)
 
     def to_payload(self) -> bytes:
-        return self.guid + _targets(self.targets) + bytes([self.flag])
+        return self.guid + _targets(self.targets) + bytes([self.start_step])
 
     @classmethod
     def from_payload(cls, payload: bytes) -> "Start":
