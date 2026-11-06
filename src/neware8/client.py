@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 
 from . import messages as msg
 from ._bdf import PendingRecordTime
-from .alarms import overloaded_energy
+from .alarms import alarm_info, overloaded_energy
 from .controller import ControllerInfo, UnitInfo
 from .errors import ConnectionLost, OperationRejected, OperationUncertain, ProtocolError, StateError
 from .measurements import readings
@@ -66,6 +66,14 @@ CONTROLS = {
     Control.CONTINUE: (Short.CONTINUE, False),
     Control.CLEAR_FLAG: (Extended.RESET_CHANNEL, True),
     Control.JUMP: (Short.JUMP, False),
+}
+# The manufacturer client's WorkType.AllowContinue: Continue resumes a test in these states.
+CONTINUABLE = {
+    ChannelState.STOPPED,
+    ChannelState.PROTECTED,
+    ChannelState.PAUSED,
+    ChannelState.BEEP,
+    ChannelState.RESERVED_PAUSE,
 }
 CLEARABLE = {
     ChannelState.FINISHED,
@@ -147,7 +155,9 @@ class Client:
         self._dirty_exports: set[str] = set()
         self._resume_token: int | None = None
         self._resume_acknowledged = False
+        self._resume_strict = True  # explicit resume: only the requested batch is accepted
         self._resume_first: asyncio.Future[None] | None = None
+        self._history_next: int | None = None  # expected position of the next batch
         self._record_revision = 0
         self._record_versions: Mapping[str, RecordRevision] = MappingProxyType({})
         self._records_changed = asyncio.Condition()
@@ -315,6 +325,7 @@ class Client:
         self._discovered.clear()
         self._bound = False
         self._error = None
+        self._history_next = None
         self._publish_snapshot()
         self._peer_task = asyncio.create_task(self._serve(reader, writer))
 
@@ -383,6 +394,40 @@ class Client:
             self._ready.set()
             self._publish_snapshot()
             await self._notify()
+        await self._recover_history()
+
+    async def _recover_history(self) -> None:
+        """After (re)connecting, resend history from the checkpoint, as the manufacturer
+        server does.
+
+        The controller resumes after the last batch it *sent*; batches in flight when the
+        connection dropped are skipped unless the host asks for them (observed).
+        """
+        checkpoint = await asyncio.to_thread(self.store.checkpoint)
+        if checkpoint is None or not self._runs:
+            return
+        try:  # eligibility needs every owned channel's first status
+            async with asyncio.timeout(self.maximum_status_age), self._updated:
+                while any(address not in self._statuses for address in self._runs):
+                    await self._updated.wait()
+        except TimeoutError:
+            logger.warning(
+                "History recovery skipped controller=%s: owned channels did not report",
+                self.controller_host,
+            )
+            return
+        async with self._operation:
+            if not self.connected or not self._eligible:
+                return
+            logger.info(
+                "History recovery controller=%s checkpoint=%#x", self.controller_host, checkpoint
+            )
+            try:
+                await self._resend(checkpoint, strict=False)
+            except OperationRejected as error:
+                logger.warning(
+                    "History recovery rejected controller=%s: %s", self.controller_host, error
+                )
 
     async def close(self) -> None:
         """Close local resources. This does not stop any controller measurement."""
@@ -586,11 +631,22 @@ class Client:
         """Store owned records durably, then ACK. Unbound or unreconciled batches are not ACKed."""
         batch = msg.HistoryBatch.from_payload(frame.payload)
         if not self._bound or any(address not in self._statuses for address in self._runs):
-            return
-        if self._resume_token is not None and (
-            not self._resume_acknowledged or batch.token != self._resume_token
-        ):
-            return
+            return  # not ACKed: the controller resends it later
+        if self._resume_token is not None:
+            if not self._resume_acknowledged:
+                return  # sent before the controller moved to the resend position
+            if batch.token != self._resume_token:
+                if self._resume_strict:
+                    return
+                # Simulator: an expired position restarts from the oldest retained history.
+                logger.error(
+                    "History resend started at %#x instead of %#x controller=%s; the "
+                    "controller no longer holds the requested position, records in between "
+                    "may be lost",
+                    batch.token,
+                    self._resume_token,
+                    self.controller_host,
+                )
         for record in batch.records:
             run = self._runs.get(ChannelAddress(record.unit, record.channel))
             if (
@@ -605,10 +661,36 @@ class Client:
             await self._notify_records(changed)
         await asyncio.to_thread(self.store.save_checkpoint, batch.token)
         await self._send(frame.answer(msg.HistoryBatch.ack_payload(batch.token), unit=0))
+        self._track_position(batch)
         if self._resume_token is not None:
             self._resume_token = None
             if self._resume_first is not None and not self._resume_first.done():
                 self._resume_first.set_result(None)
+
+    def _track_position(self, batch: msg.HistoryBatch) -> None:
+        """Log history the controller skipped within this session (observability only)."""
+        expected = self._history_next
+        skipped = None if expected is None else msg.history_gap(expected, batch.token)
+        if skipped is not None and skipped < 0:
+            return  # an earlier batch again: retransmission or replay
+        self._history_next = batch.end_token
+        if expected is None:
+            return
+        if skipped is None:
+            logger.info(
+                "History position moved from %#x to %#x controller=%s",
+                expected,
+                batch.token,
+                self.controller_host,
+            )
+        elif skipped:
+            logger.warning(
+                "History gap of %d records between %#x and %#x controller=%s",
+                skipped,
+                expected,
+                batch.token,
+                self.controller_host,
+            )
 
     async def _reconcile(self, status: ChannelStatus) -> None:
         run = self._runs.get(status.address)
@@ -988,20 +1070,28 @@ class Client:
         *,
         expected_test_id: int,
         destination_step: int | None = None,
+        acknowledged_alarm: int | None = None,
     ) -> None:
         """Stop, Continue, Clear Flag (reset) or Jump one channel.
 
+        Continue resumes a stopped, protected, paused or beeping test on the same channel,
+        keeping its TestID, step, cycle and counters. A channel showing an alarm (a protection
+        stop) is only continued if `acknowledged_alarm` names that alarm code.
+
         Completes when the controller acknowledges and, except for Clear Flag, a later status
-        of the same TestID shows the effect. A missing acknowledgement or effect raises
-        OperationUncertain and closes the connection.
+        of the same TestID shows the effect. If a continued test runs and is stopped again by
+        a protection before a running status arrives, StateError names the new alarm. A
+        missing acknowledgement or effect raises OperationUncertain and closes the connection.
         """
         operation = Control(operation)
         logger.info(
-            "Control requested channel=%s test_id=%d operation=%s destination_step=%s",
+            "Control requested channel=%s test_id=%d operation=%s destination_step=%s "
+            "acknowledged_alarm=%s",
             address,
             expected_test_id,
             operation,
             destination_step,
+            acknowledged_alarm,
         )
         if operation == Control.JUMP:
             if destination_step is None:
@@ -1009,6 +1099,10 @@ class Client:
             bounded_integer("destination_step", destination_step, 255, 1)
         elif destination_step is not None:
             raise ValueError("destination step only applies to Jump")
+        if acknowledged_alarm is not None:
+            if operation != Control.CONTINUE:
+                raise ValueError("acknowledged_alarm only applies to Continue")
+            bounded_integer("acknowledged_alarm", acknowledged_alarm, 2**32 - 1, 1)
         async with self._operation:
             if address in self._awaiting:
                 raise StateError("channel start is awaiting status confirmation")
@@ -1016,6 +1110,14 @@ class Client:
             if status.test_id != expected_test_id:
                 raise StateError("channel TestID changed")
             self._check_control(operation, status, destination_step)
+            if operation == Control.CONTINUE and status.alarm_code != (acknowledged_alarm or 0):
+                if status.alarm_code:
+                    raise StateError(
+                        f"channel stopped on alarm {status.alarm_code} "
+                        f"({alarm_info(status.alarm_code).message}); pass "
+                        f"acknowledged_alarm={status.alarm_code} to continue"
+                    )
+                raise StateError(f"channel shows no alarm {acknowledged_alarm}")
             command, extended = CONTROLS[operation]
             selection = msg.Selection(channel_mask([address.channel]), destination_step)
             reply = await self._exchange(
@@ -1049,6 +1151,8 @@ class Client:
                                 observed.state,
                             )
                             return
+                        if self._continued_then_stopped(operation, status, observed):
+                            break
             except OperationRejected:
                 logger.warning(
                     "Control rejected controller=%s channel=%s operation=%s",
@@ -1072,6 +1176,32 @@ class Client:
                 if isinstance(error, asyncio.CancelledError):
                     raise
                 raise OperationUncertain("control effect could not be confirmed") from error
+            # Certain outcome: the test ran after Continue and stopped again.
+            logger.warning(
+                "Continued test stopped again channel=%s test_id=%d state=%s alarm=%d",
+                address,
+                expected_test_id,
+                observed.state,
+                observed.alarm_code,
+            )
+            reason = (
+                f" on alarm {observed.alarm_code} ({alarm_info(observed.alarm_code).message})"
+                if observed.alarm_code
+                else ""
+            )
+            raise StateError(f"test continued, then stopped again ({observed.state}){reason}")
+
+    @staticmethod
+    def _continued_then_stopped(
+        operation: Control, before: ChannelStatus, observed: ChannelStatus
+    ) -> bool:
+        """Test time only advances while a channel runs (observed), so a later non-running
+        status with more elapsed time means Continue took effect and the test stopped again."""
+        return (
+            operation == Control.CONTINUE
+            and observed.state != ChannelState.RUNNING
+            and observed.elapsed_s > before.elapsed_s
+        )
 
     @staticmethod
     def _check_control(operation: Control, status: ChannelStatus, step: int | None) -> None:
@@ -1079,9 +1209,12 @@ class Client:
             if status.state not in CLEARABLE:
                 raise StateError(f"Clear Flag does not apply to a {status.state} channel")
             return
-        required = ChannelState.STOPPED if operation == Control.CONTINUE else ChannelState.RUNNING
-        if status.state != required or status.alarm_code:
-            raise StateError(f"{operation.value} requires a {required} channel without alarm")
+        if operation == Control.CONTINUE:
+            if status.state not in CONTINUABLE:
+                raise StateError(f"Continue does not apply to a {status.state} channel")
+            return
+        if status.state != ChannelState.RUNNING or status.alarm_code:
+            raise StateError(f"{operation.value} requires a running channel without alarm")
         if operation == Control.JUMP and status.step_id == step:
             raise StateError("Jump destination is already active; the jump cannot be confirmed")
 
@@ -1103,8 +1236,10 @@ class Client:
     async def resume_history(self, *, index: int | None = None) -> None:
         """Ask the controller to resend history from the saved token (or `index`).
 
-        The token is used as is: the controller resends that batch again and duplicates are
-        dropped by sequence. No arithmetic, no retries.
+        The client already does this from the saved token after every (re)connect; call it
+        to resend from an independently established position. The token is used as is: the
+        controller resends that batch again and duplicates are dropped by sequence. The first
+        accepted batch must carry the token; otherwise the session is closed. No retries.
         """
         logger.info(
             "History resumption requested controller=%s index=%s", self.controller_host, index
@@ -1118,32 +1253,57 @@ class Client:
             if selected is None:
                 raise StateError("no saved history token; supply an index")
             bounded_integer("history index", selected, 2**32 - 1)
-            self._resume_token, self._resume_acknowledged = selected, False
-            future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-            self._resume_first = future
+            await self._resend(selected, strict=True)
 
-            async def accepted(reply: Frame) -> None:
-                self._resume_acknowledged = reply.result == 0
+    async def _resend(self, token: int, *, strict: bool) -> None:
+        """Send SetReSendDfData and wait until the first resent batch is stored. Holds no lock
+        itself; callers hold `_operation`.
 
-            try:
-                reply = await self._exchange(
-                    self._session.request(
-                        Extended.RESEND_HISTORY, selected.to_bytes(4, "little"), extended=True
-                    ),
-                    reply_unit=None,
-                    on_reply=accepted,
-                )
-                self._payload(reply, 0)
-                await asyncio.wait_for(future, REPLY_TIMEOUT)
-            except BaseException:
+        `strict` accepts only a batch at `token` and closes the session otherwise. Automatic
+        recovery is not strict: whatever the controller resends first is stored, and an
+        unexpected position is logged.
+        """
+        self._resume_token, self._resume_acknowledged = token, False
+        self._resume_strict = strict
+        self._history_next = None
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._resume_first = future
+
+        async def accepted(reply: Frame) -> None:
+            self._resume_acknowledged = reply.result == 0
+
+        try:
+            reply = await self._exchange(
+                self._session.request(
+                    Extended.RESEND_HISTORY, token.to_bytes(4, "little"), extended=True
+                ),
+                reply_unit=None,
+                on_reply=accepted,
+            )
+            self._payload(reply, 0)
+            await asyncio.wait_for(future, REPLY_TIMEOUT)
+        except TimeoutError:
+            if strict:
                 self._disconnect()
                 raise
-            finally:
-                if not future.done():
-                    future.cancel()
-                self._resume_first = None
-                self._resume_token = None
-                self._resume_acknowledged = False
+            logger.warning(
+                "No history resent from %#x within %g s controller=%s",
+                token,
+                REPLY_TIMEOUT,
+                self.controller_host,
+            )
+        except OperationRejected:
+            raise  # the controller kept its position; the session is intact
+        except BaseException:
+            self._disconnect()
+            raise
+        finally:
+            if not future.done():
+                future.cancel()
+            self._resume_first = None
+            self._resume_token = None
+            self._resume_acknowledged = False
+            self._resume_strict = True
 
     async def history_minimum_index(self) -> int:
         """The oldest history position the controller can still resend (GetDfMinIndex)."""

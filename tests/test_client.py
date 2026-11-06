@@ -18,8 +18,9 @@ from neware8 import (
     Recipe,
     StateError,
 )
+from neware8.messages import HISTORY_FILE_SHIFT
 from neware8.protocol import Extended, Frame, Short
-from fake_controller import FakeController
+from fake_controller import FakeController, HistoryLog
 from helpers import PROFILE, XML
 
 ADDRESS = PROFILE.address
@@ -211,18 +212,135 @@ def test_settings_and_information(tmp_path):
     run(check())
 
 
+async def until(condition, timeout=5):
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+async def reconnect(client, first, log=None):
+    """Drop `first` and connect a controller with the same channels and history log."""
+    await first.close()
+    await until(lambda: client._writer is None)
+    second = FakeController(client.listening_port, log=first.log if log is None else log)
+    second.channels = first.channels
+    await second.connect()
+    await client.wait_ready(5)
+    return second
+
+
+async def sequences(client, run):
+    return [point.sequence for point in await client.read(run)]
+
+
 def test_resume_history_waits_for_the_requested_batch(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
             await client.start(Recipe(XML), PROFILE)
             await wait_state(client, ChannelState.RUNNING)
-            await client.resume_history(index=5)
-            assert fake.sent(True, Extended.RESEND_HISTORY)[0].payload == (5).to_bytes(4, "little")
-            async with asyncio.timeout(5):
-                while 5 not in fake.acks:
-                    await asyncio.sleep(0.01)
+            fake.record([fake.history_record(1, 1, s) for s in (1, 2, 3)])
+            token = fake.log.token(2)
+            await until(lambda: token in fake.acks)
+            await client.resume_history(index=token)
+            assert fake.sent(True, Extended.RESEND_HISTORY)[0].payload == token.to_bytes(
+                4, "little"
+            )
+            await until(lambda: fake.acks.count(token) == 2)
 
     run(check())
+
+
+def test_explicit_resume_requires_the_requested_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr(neware8.client, "REPLY_TIMEOUT", 0.3)
+
+    async def check():
+        async with connected(tmp_path) as (client, fake):
+            await client.start(Recipe(XML), PROFILE)
+            await wait_state(client, ChannelState.RUNNING)
+            fake.record([fake.history_record(1, 1, 1)])
+            await until(lambda: fake.acks)
+            with pytest.raises(TimeoutError):  # unknown position: controller restarts at 0
+                await client.resume_history(index=fake.log.token(7))
+            await until(lambda: not client.connected)
+
+    run(check())
+
+
+def test_reconnect_resends_history_lost_in_flight(tmp_path):
+    async def check():
+        async with connected(tmp_path) as (client, first):
+            started = await client.start(Recipe(XML), PROFILE)
+            await wait_state(client, ChannelState.RUNNING)
+            first.record([first.history_record(1, 1, s) for s in (1, 2)])
+            await until(lambda: first.log.token(0) in first.acks)
+            first.record([first.history_record(1, 1, s) for s in (3, 4, 5)], lost=True)
+            second = await reconnect(client, first)
+            try:
+                second.record([second.history_record(1, 1, 6)])
+                checkpoint = first.log.token(0).to_bytes(4, "little")
+                await until(lambda: [f.payload for f in second.sent(True, Extended.RESEND_HISTORY)])
+                assert second.sent(True, Extended.RESEND_HISTORY)[0].payload == checkpoint
+                async with asyncio.timeout(5):
+                    while await sequences(client, started) != [1, 2, 3, 4, 5, 6]:
+                        await asyncio.sleep(0.02)
+            finally:
+                await second.close()
+
+    run(check())
+
+
+def test_reconnect_without_owned_runs_sends_no_resend(tmp_path):
+    async def check():
+        async with connected(tmp_path) as (client, first):
+            first.history(first.log.token(0), [first.history_record(1, 1, 1, test_id=9)])
+            await until(lambda: first.acks)
+            second = await reconnect(client, first)
+            try:
+                await asyncio.sleep(0.2)
+                assert second.sent(True, Extended.RESEND_HISTORY) == []
+            finally:
+                await second.close()
+
+    run(check())
+
+
+def test_expired_checkpoint_replays_oldest_history(tmp_path, caplog):
+    async def check():
+        async with connected(tmp_path) as (client, first):
+            started = await client.start(Recipe(XML), PROFILE)
+            await wait_state(client, ChannelState.RUNNING)
+            first.record([first.history_record(1, 1, s) for s in (1, 2)])
+            await until(lambda: first.acks)
+            # The controller no longer holds the checkpoint's file; it restarts at the oldest.
+            records = first.log.records + [first.history_record(1, 1, 3)]
+            log = HistoryLog(base=110 << HISTORY_FILE_SHIFT, records=records, sent=3)
+            second = await reconnect(client, first, log)
+            try:
+                async with asyncio.timeout(5):
+                    while await sequences(client, started) != [1, 2, 3]:
+                        await asyncio.sleep(0.02)
+            finally:
+                await second.close()
+
+    run(check())
+    assert "History resend started at 0x37000000 instead of 0x36800000" in caplog.text
+
+
+def test_skipped_history_is_logged_once(tmp_path, caplog):
+    async def check():
+        async with connected(tmp_path) as (client, fake):
+            await client.start(Recipe(XML), PROFILE)
+            await wait_state(client, ChannelState.RUNNING)
+            first = [fake.history_record(1, 1, s) for s in (1, 2)]
+            fake.history(fake.log.token(0), first)
+            fake.history(fake.log.token(5), [fake.history_record(1, 1, 6)])
+            fake.history(fake.log.token(0), first)  # retransmission: not a gap
+            fake.history(fake.log.token(6), [fake.history_record(1, 1, 7)])
+            await until(lambda: fake.log.token(6) in fake.acks)
+
+    run(check())
+    assert caplog.text.count("History gap") == 1
+    assert "History gap of 3 records" in caplog.text
 
 
 def test_unsolicited_reply_ends_the_session(tmp_path):
@@ -277,5 +395,58 @@ def test_silent_controller_is_dropped_so_it_can_reconnect(tmp_path):
         for fake in (first, second):
             await fake.close()
         await client.close()
+
+    run(check())
+
+
+def test_continue_after_a_protection_stop_needs_the_alarm_acknowledged(tmp_path):
+    async def check():
+        async with connected(tmp_path) as (client, fake):
+            started = await client.start(Recipe(XML), PROFILE)
+            await wait_state(client, ChannelState.RUNNING)
+            fake.protect(1, 1, alarm=501)
+            await wait_state(client, ChannelState.PROTECTED)
+            test_id = started.test_id
+            with pytest.raises(StateError, match="acknowledged_alarm=501"):
+                await client.control(ADDRESS, Control.CONTINUE, expected_test_id=test_id)
+            with pytest.raises(StateError, match="acknowledged_alarm=501"):  # wrong alarm
+                await client.control(
+                    ADDRESS, Control.CONTINUE, expected_test_id=test_id, acknowledged_alarm=502
+                )
+            assert fake.sent(False, Short.CONTINUE) == []
+            await client.control(
+                ADDRESS, Control.CONTINUE, expected_test_id=test_id, acknowledged_alarm=501
+            )
+            status = client.snapshot.get(ADDRESS)
+            assert (status.state, status.alarm_code, status.test_id) == (
+                ChannelState.RUNNING,
+                0,
+                test_id,
+            )
+            with pytest.raises(ValueError, match="only applies to Continue"):
+                await client.control(
+                    ADDRESS, Control.STOP, expected_test_id=test_id, acknowledged_alarm=501
+                )
+
+    run(check())
+
+
+def test_continue_that_protects_again_reports_the_new_alarm(tmp_path):
+    async def check():
+        async with connected(tmp_path) as (client, fake):
+            started = await client.start(Recipe(XML), PROFILE)
+            await wait_state(client, ChannelState.RUNNING)
+            fake.protect(1, 1, alarm=501)
+            await wait_state(client, ChannelState.PROTECTED)
+            fake.channels[1, 1].retrip_alarm = 503
+            with pytest.raises(StateError, match="continued, then stopped again.*alarm 503"):
+                await client.control(
+                    ADDRESS,
+                    Control.CONTINUE,
+                    expected_test_id=started.test_id,
+                    acknowledged_alarm=501,
+                )
+            assert client.connected  # a certain outcome keeps the session
+            assert client.snapshot.get(ADDRESS).alarm_code == 503
 
     run(check())

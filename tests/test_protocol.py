@@ -395,3 +395,15 @@ def test_alarm_details_reuse_energy_slots():
     }
     assert alarm_details(250, 0, 0x0305) == {"other_unit": 3, "other_channel": 5}
     assert alarm_details(1, 0, 0) is None
+
+
+def test_history_positions_advance_94_bytes_per_record():
+    # Takeover capture 2026-09-09: a 3-record batch at 0x36C617D0, the next at 0x36C618EA.
+    record = msg.HistoryRecord.from_bytes(bytes(msg.HistoryRecord.SIZE))
+    batch = msg.HistoryBatch(0x36C617D0, (record,) * 3)
+    assert batch.end_token == 0x36C618EA
+    assert msg.history_gap(batch.end_token, 0x36C618EA) == 0
+    assert msg.history_gap(batch.end_token, 0x36C618EA + 2 * 94) == 2
+    assert msg.history_gap(batch.end_token, 0x36C617D0) == -3  # resent
+    assert msg.history_gap(batch.end_token, 0x36C618EB) is None  # not on a record boundary
+    assert msg.history_gap(batch.end_token, 0x37000000) is None  # another file

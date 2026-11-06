@@ -7,6 +7,11 @@ device, uploads status periodically and follows the device rules that matter for
   running rejects Start. StartConfirm starts armed channels (results 0/1/2/3).
 * The download buffer resets at fragment 1; overflow answers 2, an undecodable program 1.
 * Stop/Continue/Reset/Jump change the channel state and echo the selection.
+* History lives in a `HistoryLog` that outlives the connection. Batch tokens are byte
+  positions (94 bytes per record). A new connection continues after the last batch *sent*,
+  so unacknowledged batches in flight are skipped (observed in the takeover capture).
+  SetReSendDfData moves the read position; an unknown position restarts from the oldest
+  record (simulator, CSendDfDataToServer::InitDataPoint).
 """
 
 import asyncio
@@ -17,7 +22,7 @@ from neware8 import messages as msg
 from neware8.protocol import CONTROLLER_UNIT, Extended, Frame, FrameReader, Short, mask_channels
 from neware8.steps import decode_program
 
-RUNNING, STOPPED, FINISHED = 0x10, 0x20, 0x00
+RUNNING, STOPPED, PROTECTED, FINISHED = 0x10, 0x20, 0x30, 0x00
 GUID = bytes(range(16))
 
 
@@ -32,6 +37,22 @@ class SimChannel:
     step_type: int = 0
     alarm: int = 0
     sequence: int = 0
+    total_time_ms: int = 0  # advances only while running, as on hardware
+    retrip_alarm: int = 0  # Continue runs briefly, then this protection fires
+
+
+@dataclass
+class HistoryLog:
+    base: int = 109 << msg.HISTORY_FILE_SHIFT  # file 109, offset 0, as on our controller
+    records: list[bytes] = field(default_factory=list)
+    sent: int = 0  # index of the next record to send
+
+    def token(self, index: int) -> int:
+        return self.base + index * msg.HistoryRecord.SIZE
+
+    def index(self, token: int) -> int | None:
+        index, rest = divmod(token - self.base, msg.HistoryRecord.SIZE)
+        return index if not rest and 0 <= index <= len(self.records) else None
 
 
 @dataclass
@@ -48,6 +69,8 @@ class FakeController:
     received: list[Frame] = field(default_factory=list)
     acks: list[int] = field(default_factory=list)
     min_history_index: int = 100
+    log: HistoryLog = field(default_factory=HistoryLog)
+    batch_size: int = 2
 
     def __post_init__(self) -> None:
         self.channels = {
@@ -113,6 +136,9 @@ class FakeController:
     # ------------------------------------------------------------------ #
     async def _status_loop(self) -> None:
         while True:
+            for ch in self.channels.values():
+                if ch.work_type == RUNNING:
+                    ch.total_time_ms += 100
             for unit in range(1, self.units + 1):
                 self.send_status(unit)
             await asyncio.sleep(self.interval)
@@ -152,7 +178,7 @@ class FakeController:
             0,
             (-10) & 0xFFFFFFFF,
             ch.alarm,
-            2000,
+            ch.total_time_ms,
             0,
             0,
             ch.test_id,
@@ -160,6 +186,22 @@ class FakeController:
             0xFFFFFFFF,
             0,
         )
+
+    def record(self, records: list[bytes], *, lost: bool = False) -> None:
+        """Store records and send them; `lost` sends them into a dead connection."""
+        self.log.records += records
+        if lost:
+            self.log.sent = len(self.log.records)
+        else:
+            self.send_history()
+
+    def send_history(self) -> None:
+        """Send everything after the read position, `batch_size` records per batch."""
+        log = self.log
+        while log.sent < len(log.records):
+            batch = log.records[log.sent : log.sent + self.batch_size]
+            self.history(log.token(log.sent), batch)
+            log.sent += len(batch)
 
     def history(self, token: int, records: list[bytes]) -> None:
         payload = struct.pack("<BI", len(records), token) + b"".join(records)
@@ -255,7 +297,9 @@ class FakeController:
             self.send(frame.answer(self.min_history_index.to_bytes(4, "little")))
         elif (frame.extended, frame.command) == (True, Extended.RESEND_HISTORY):
             self.send(frame.answer())
-            self.history(int.from_bytes(p, "little"), [])
+            index = self.log.index(int.from_bytes(p, "little"))
+            self.log.sent = 0 if index is None else index
+            self.send_history()
         elif not frame.extended and frame.command == Short.GET_CONTROLLER_VERSION:
             self.send(frame.answer(b"SIM_1.0".ljust(30, b"\0")))
         elif not frame.extended and frame.command == Short.GET_UNIT_VERSION:
@@ -350,10 +394,17 @@ class FakeController:
             elif frame.command == Short.STOP:
                 ch.work_type = STOPPED
             elif frame.command == Short.CONTINUE:
-                ch.work_type = RUNNING
+                ch.work_type, ch.alarm = RUNNING, 0
+                if ch.retrip_alarm:  # protected again before the next status upload
+                    ch.total_time_ms += 500
+                    ch.work_type, ch.alarm, ch.retrip_alarm = PROTECTED, ch.retrip_alarm, 0
             elif frame.command == Short.JUMP:
                 ch.step_id = selection.step or ch.step_id
         self.send(frame.answer(frame.payload[:8]))
+
+    def protect(self, unit: int, channel: int, alarm: int) -> None:
+        self.channels[unit, channel].work_type = PROTECTED
+        self.channels[unit, channel].alarm = alarm
 
     def finish(self, unit: int, channel: int) -> None:
         self.channels[unit, channel].work_type = FINISHED

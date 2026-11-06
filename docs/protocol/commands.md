@@ -45,7 +45,7 @@ byte-exact in `tests/test_protocol.py`). The unit byte is the target unit except
 | 3 | `0036` download | `GUID, targets, total bytes:u32, steps:u16, end flag:u8, index:u16, fragment` | `GUID, targets, end flag, index` |
 | 4 | `0054` per-test protections | `GUID, targets, length:u32, protection block` | `GUID, targets` |
 | 5 | `003D` device protections, unit 0 | `length:u32, protection block` | empty |
-| 6 | `003C` start | `GUID, targets, flag:u8 = 1` | `GUID, count:u16, count × (unit, channel, TestID:u32)` |
+| 6 | `003C` start | `GUID, targets, start step:u8 = 1` | `GUID, count:u16, count × (unit, channel, TestID:u32)` |
 | 7 | `003A` confirm | `GUID, count:u16, count × (unit, channel, TestID)` | `GUID, count:u16, count × (unit, channel, result)` |
 
 What the controller does with them:
@@ -96,7 +96,11 @@ continue-cutoff delay, CCCV zero-current protection and capacity-retention cycle
 | short `6F` Jump | `mask:u64, step:u8` | mask |
 
 The unit byte selects the unit. Stop keeps the TestID and times; Continue resumes; Clear
-Flag turns a stopped or protected channel into finished. There is no separate pause command
+Flag turns a stopped or protected channel into finished. The manufacturer client
+(`WorkType.AllowContinue`) offers Continue for stopped, protected, paused, beeping and
+reserve-paused channels and sends the plain `14` in every case. Test time freezes while a
+channel is stopped; on Continue the total time carries on and the step timer restarts
+(observed). There is no separate pause command
 (pausing at a planned point is Reserve Pause, below).
 
 ## Settings and information
@@ -129,10 +133,15 @@ dates decode to plausible 2022–2023 dates.
 ## History recovery
 
 `000F`, unit 0, empty → `min index:u32`. `0010`, unit 0, `index:u32` → empty reply, then
-the controller resends history starting with the batch whose token is `index`. The
-manufacturer server requests its saved token without adding one and ignores batches until
-the first one carries that token. How long the controller keeps history and what an ACK
-releases are unknown.
+the controller resends history starting with the batch whose token is `index` (observed:
+the next batch carries it). The manufacturer server requests its saved token without adding
+one after every connect and ignores batches until the first one carries that token; this
+library does the same (see [records](records.md#history-extended-0015) for why).
+
+In the simulator, an `index` the controller no longer holds restarts from the oldest
+retained history instead of failing, and `000F` returns the start of the oldest retained
+file only until a resend position has been set; afterwards it returns the current read
+position. Retention on the real controller is unknown.
 
 ## Reserve Pause (not tested on hardware)
 

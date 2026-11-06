@@ -1,6 +1,6 @@
 """Transactional current-run recording and bounded-memory BDF Parquet export."""
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 import logging
@@ -262,6 +262,7 @@ class MeasurementStore:
         eligible = set(eligible_runs)
         changed: dict[str, RecordChange] = {}
         highwater: dict[str, int] = {}
+        archived: dict[str, Callable[[int], bool] | None] = {}
         with self._transaction() as db:
             rows = db.execute("SELECT id, unit, channel, test_id FROM runs").fetchall()
             selected = {
@@ -273,8 +274,16 @@ class MeasurementStore:
                 run_id = selected.get((item.unit, item.channel, item.test_id))
                 if run_id is None:
                     continue
-                if db.execute("SELECT 1 FROM archives WHERE run_id=?", (run_id,)).fetchone():
-                    raise StorageError(f"history arrived after finalization for run {run_id}")
+                if run_id not in archived:
+                    archived[run_id] = _archived_sequences(db, run_id)
+                covered = archived[run_id]
+                if covered is not None:
+                    # A resend (after a reconnect) repeats archived records: ignore those.
+                    # Auxiliary/event records are not archived, so they cannot be checked.
+                    main = item.data_flag == HistoryRecord.MAIN and not item.aux
+                    if main and not covered(item.sequence):
+                        raise StorageError(f"history arrived after finalization for run {run_id}")
+                    continue
                 raw = item.raw
                 if item.data_flag != HistoryRecord.MAIN or item.aux:
                     db.execute("INSERT OR IGNORE INTO opaque_records VALUES (?, ?)", (run_id, raw))
@@ -619,3 +628,18 @@ class MeasurementStore:
         bounded_integer("history token", token, 2**32 - 1)
         with self._transaction() as db:
             db.execute("INSERT OR REPLACE INTO metadata VALUES ('history_token', ?)", (str(token),))
+
+
+def _archived_sequences(db: sqlite3.Connection, run_id: str) -> Callable[[int], bool] | None:
+    """Membership test for a finalized run's sequences, or None if it is not finalized.
+
+    An archive holds sequences 1..last minus its recorded gaps (see `export`).
+    """
+    row = db.execute("SELECT record_count, gaps FROM archives WHERE run_id=?", (run_id,)).fetchone()
+    if row is None:
+        return None
+    gaps = [tuple(gap) for gap in json.loads(row["gaps"])]
+    last = row["record_count"] + sum(end - start + 1 for start, end in gaps)
+    return lambda sequence: (
+        1 <= sequence <= last and not any(start <= sequence <= end for start, end in gaps)
+    )

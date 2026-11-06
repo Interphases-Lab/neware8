@@ -35,6 +35,27 @@ Controller → host, unit `FE`. Payload: `count:u8`, `token:u32`, then `count` 9
 The host ACKs with `FF 00 15 80`, unit 0, carrying the token. The library stores records
 durably before it ACKs; an unacknowledged batch is sent again later.
 
+The token is the controller's read position before the batch's first record. Positions
+advance 94 bytes per record: every consecutive pair of distinct batches in our captures is
+contiguous (observed, 200 of 200 pairs in four sessions), so `HistoryBatch.end_token` is
+the next batch's token and a larger token means skipped records. The simulator splits a
+position into a history file number (bits 23 and up) and a byte offset within the file
+(bits 0–22); our controller's tokens fit that (file 99, later 109), without the simulator's
+bit 31. Batches hold up to 12 records on our controller (10 in the simulator).
+
+How the controller sends (simulator `CSendDfDataToServer`, code-derived unless marked):
+
+* It keeps a window of unacknowledged batches (up to 20 in the simulator) and resends any
+  that stay unacknowledged with the same token (simulator after ~10 s; observed once on
+  hardware after 23 s). New history waits until the window is acknowledged.
+* After a reconnect it continues after the last batch it **sent**: batches unacknowledged
+  when the connection dropped are skipped (observed in the takeover capture) unless the
+  host sends `0010`. The manufacturer server always sends `0010` with its last token.
+* `0010` with a position the controller no longer holds is not rejected; it restarts from
+  the oldest retained history.
+* History files form a ring of 256; the oldest is overwritten when the ring is full.
+  Retention on the real controller is unknown.
+
 | Offset | Field | Type |
 |---|---|---|
 | 0 | data flag (record kind, below) | u8 |

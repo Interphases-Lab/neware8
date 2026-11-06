@@ -44,7 +44,8 @@ The library cannot remove copies made independently by another application.
 The last durable device-level history token is separate from channel sequence
 numbers. Records are committed before saving the token, and both happen before
 ACK. A crash between those commits can cause replay; deduplication makes that safe.
-No arithmetic on tokens or assumptions about retention epochs are used.
+The saved token is the start of the last acknowledged batch, so a resend from it repeats
+that batch. Token arithmetic is used only to log gaps, never to choose a resend position.
 
 ## BDF mapping
 
@@ -64,7 +65,9 @@ the working records intact. Finished runs are scheduled again on reconnect,
 covering interrupted finalization. Undecoded auxiliary records are also deleted
 after successful publication; they are not represented in BDF.
 History received after finalization raises `StorageError` and is not
-acknowledged; the archive remains unchanged. During the grace period, duplicate
+acknowledged; the archive remains unchanged. Records the archive already holds (sequence
+within 1..last and outside its gaps) are ignored instead, because the client requests a
+resend after every connect; auxiliary and event records of a finalized run are ignored. During the grace period, duplicate
 and conflicting records retain their usual semantics. Shutdown cancels pending
 grace periods, preserving working records for reconnect, and waits for any
 publication already in progress. SQLite reuses released pages; its file need not shrink.
