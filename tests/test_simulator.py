@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from neware8 import ChannelState, Client, Control, Recipe, alarm_info
+from neware8 import ChannelState, Client, Control, Recipe, RunState, alarm_info
 from neware8.simulator import CAPACITY_UPPER_ALARM, SimulatedController
 from helpers import PROFILE, XML
 
@@ -118,7 +118,7 @@ async def test_capacity_protection_stops_the_channel_with_an_alarm(tmp_path):
 @synchronous
 async def test_stop_continue_and_clear_flag(tmp_path):
     async with simulated(tmp_path, time_scale=10) as (client, _):
-        run = await client.start(Recipe(charge_xml(time_ms=3_600_000)), PROFILE)
+        await client.start(Recipe(charge_xml(time_ms=3_600_000)), PROFILE)
         await wait_state(client, run.test_id, ChannelState.RUNNING)
 
         await client.control(ADDRESS, Control.STOP, expected_test_id=run.test_id)
@@ -152,3 +152,39 @@ async def test_history_written_while_disconnected_arrives_after_reconnect(tmp_pa
 
     assert [point.sequence for point in points] == list(range(1, 22))
     assert points[-1].step_count == 1
+
+
+class ArmedStatusController(SimulatedController):
+    """Reports the armed channel, finished with its new TestID, before the start is confirmed."""
+
+    def _handle_start(self, frame):
+        super()._handle_start(frame)
+        for unit in range(1, self.units + 1):
+            self._send_status(unit)
+
+
+@synchronous
+async def test_armed_status_neither_confirms_nor_finishes_the_run(tmp_path):
+    client = Client(
+        host="127.0.0.1",
+        controller_host="127.0.0.1",
+        storage_directory=tmp_path,
+        port=0,
+        upload_interval_raw=1,
+        history_grace_period_s=0.2,
+    )
+    await client.listen()
+    simulator = ArmedStatusController(port=client.listening_port, status_period_s=5, time_scale=1)
+    await simulator.start()
+    try:
+        await client.wait_ready(5)
+        while len(client.snapshot.channels) < 8:
+            await client.wait_snapshot(after_revision=client.snapshot.revision, timeout=5)
+        await client.start(Recipe(charge_xml(time_ms=3_600_000)), PROFILE)
+        await asyncio.sleep(0.5)  # longer than the grace period of a wrongly finished run
+        assert client.exporting_channels == ()
+        assert [r.state for r in await client.runs()] == [RunState.RECORDING]
+        assert ADDRESS in client._awaiting  # not confirmed by the armed status
+    finally:
+        await simulator.close()
+        await client.close()

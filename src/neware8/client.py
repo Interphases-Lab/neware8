@@ -712,6 +712,12 @@ class Client:
                 await asyncio.to_thread(self.store.set_state, run.id, RunState.INTERRUPTED)
                 self._runs[status.address] = await asyncio.to_thread(self.store.get, run.id)
             return
+        if status.address in self._starting:
+            # Armed by Start but not yet confirmed: the channel still reports its idle state
+            # with the new TestID, which says nothing about the run. It must neither confirm
+            # the start nor finish the run. Frames are handled in arrival order, so every
+            # status sent before the controller confirmed is handled while still starting.
+            return
         self._eligible.add(run.id)
         self._awaiting.pop(status.address, None)
         if status.state == ChannelState.FINISHED and run.state != RunState.FINISHED:
