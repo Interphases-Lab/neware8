@@ -51,6 +51,20 @@ def current_scale(range_raw: int) -> int:
     return next((scale for limit, scale in thresholds if magnitude < limit), default)
 
 
+def current_range_a(range_raw: int) -> float:
+    """Full-scale current of a range encoding, in A (the manufacturer's Unit.GetCurrRange).
+
+    The encoding is in mA; negative values of a million or more count 1e-9 mA. Only -10
+    (10 mA) has been seen on hardware.
+    """
+    value = _float32(signed32(range_raw & 0xFFFFFFFF))
+    if value == 0 or value <= -(2**31):
+        raise ValueError(f"current range {signed32(range_raw & 0xFFFFFFFF)} has no rating")
+    magnitude = abs(value)
+    milliamperes = magnitude / 1e9 if value < 0 and magnitude >= 1e6 else magnitude
+    return milliamperes / 1000
+
+
 # Work-type bits: base state in bits 4..5, extended state in bits 8+ (0 and 6 mean "base").
 BASE_STATES = {
     0x00: ChannelState.FINISHED,

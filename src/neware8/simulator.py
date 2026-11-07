@@ -149,6 +149,7 @@ class SimulatedController:
       channels_per_unit: Main channels per unit, 1..8.
       time_scale: How many times faster than wall-clock time the tests run.
       current_range_raw: The channels' native current range; -10 is a 10 mA range.
+      voltage_range_v: The channels' advertised voltage range, in V.
       cell: Builds the simulated cell of a channel from its (unit, channel) address.
       status_period_s: Wall-clock seconds between status uploads; None follows the upload
         interval the client sets.
@@ -166,6 +167,7 @@ class SimulatedController:
         channels_per_unit: int = 8,
         time_scale: float = 1.0,
         current_range_raw: int = -10,
+        voltage_range_v: int = 5,
         cell: Callable[[int, int], SimulatedCell] | None = None,
         status_period_s: float | None = None,
         reconnect_delay_s: float = 1.0,
@@ -186,6 +188,7 @@ class SimulatedController:
         self.units, self.channels_per_unit = units, channels_per_unit
         self.time_scale = time_scale
         self.range_raw = current_range_raw
+        self.voltage_range_v = voltage_range_v
         self.scale = current_scale(current_range_raw & 0xFFFFFFFF)
         self.status_period_s = status_period_s
         self.reconnect_delay_s = reconnect_delay_s
@@ -292,7 +295,8 @@ class SimulatedController:
         for unit in range(self.units):
             block[unit] = (1 << self.channels_per_unit) - 1
         block[32] = msg.DeviceInfo.MAIN
-        struct.pack_into("<ii", block, 33, self.range_raw, self.range_raw)
+        struct.pack_into("<iiI", block, 33, self.range_raw, self.range_raw, self.voltage_range_v)
+        struct.pack_into("<Bi", block, 53, 1, self.range_raw)  # one selectable current range
         block[99:115] = self.guid
         header = struct.pack("<H6sBBB", 0x75, b"Neware", 7, 2, 1)
         return header + struct.pack("<BH", 0, 1) + bytes(block)

@@ -32,6 +32,7 @@ rea_followup_20261106.md`).
 | `04`/`05` purpose unknown | alarm sound/light status |
 | `003C` ends in a flag, always 1 | the start step ID (`m_btStepID`, default 1); starting elsewhere is untested |
 | History after finalization always fails | resent records the archive already holds are ignored; new ones still fail |
+| Channel profiles are site configuration | derived from SendInfo ranges and address order (`neware8.profiles`); configured profiles only override |
 
 ## Open questions
 

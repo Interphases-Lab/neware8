@@ -33,6 +33,20 @@ Bodies of consecutive parts concatenate into `device type:u8, block count:u16`, 
 | 99 | controller GUID (the same as in the `002A` reply) |
 | 115 | 32 unit GUIDs of 16 bytes |
 
+The manufacturer server passes these ranges unchanged to its client
+(`GetChlInfo70Resp`: `ChgRange`, `DChgRange`, `VoltRange`, `CurrStepRange`), which uses
+them as the channel's ratings: the voltage range in V (`SystemUnit.ToBaseValue(..., V)` in
+the step editor), the charge range as rated current (`Unit.GetCurrRange`: mA, negative
+values of 10^6 or more in 10^-9 mA) and as the program's current scale
+(`Step.Scale = Unit.GetCurrScale(range)`) (code-derived). Our controller advertises 5 and
+−10 on all 80 channels, in two blocks of 48 and 32 channels; blocks are not in address
+order (observed).
+
+The physical IDs of the `73` channel map are host configuration: the manufacturer client
+keeps them in its database, set in a mapping dialog, and no command reads them from the
+controller (code-derived). The site's map is the default, the index in address order
+(observed, all 80 entries).
+
 ## Starting a test
 
 The manufacturer client sends seven requests, each after the previous reply (reproduced

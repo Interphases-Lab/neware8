@@ -80,7 +80,7 @@ async def wait_records(client, test, count, timeout=10.0):
 @synchronous
 async def test_program_with_cycles_runs_to_completion_and_is_recorded(tmp_path):
     async with simulated(tmp_path, time_scale=100) as (client, _):
-        run = await client.start(Recipe(XML), PROFILE)
+        run = await client.start(Recipe(XML), ADDRESS)
         status = await wait_state(client, run.test_id, ChannelState.FINISHED)
         assert status.alarm_code == 0
         # The first record, then five per 10 s execution of the 2 s recording interval.
@@ -100,7 +100,7 @@ async def test_program_with_cycles_runs_to_completion_and_is_recorded(tmp_path):
 async def test_capacity_protection_stops_the_channel_with_an_alarm(tmp_path):
     async with simulated(tmp_path, time_scale=100) as (client, _):
         recipe = Recipe(charge_xml(time_ms=3_600_000, capacity_mas=50))  # 10 s at 5 mA
-        run = await client.start(recipe, PROFILE)
+        run = await client.start(recipe, ADDRESS)
         status = await wait_state(client, run.test_id, ChannelState.PROTECTED)
 
     assert status.alarm_code == CAPACITY_UPPER_ALARM
@@ -111,7 +111,7 @@ async def test_capacity_protection_stops_the_channel_with_an_alarm(tmp_path):
 @synchronous
 async def test_stop_continue_and_clear_flag(tmp_path):
     async with simulated(tmp_path, time_scale=10) as (client, _):
-        run = await client.start(Recipe(charge_xml(time_ms=3_600_000)), PROFILE)
+        run = await client.start(Recipe(charge_xml(time_ms=3_600_000)), ADDRESS)
         await wait_state(client, run.test_id, ChannelState.RUNNING)
 
         await client.control(ADDRESS, Control.STOP, expected_test_id=run.test_id)
@@ -132,7 +132,7 @@ async def test_stop_continue_and_clear_flag(tmp_path):
 @synchronous
 async def test_history_written_while_disconnected_arrives_after_reconnect(tmp_path):
     async with simulated(tmp_path, time_scale=50) as (client, simulator):
-        run = await client.start(Recipe(charge_xml(time_ms=20_000)), PROFILE)
+        run = await client.start(Recipe(charge_xml(time_ms=20_000)), ADDRESS)
         await wait_state(client, run.test_id, ChannelState.RUNNING)
         simulator._disconnect()  # the controller drops the connection mid-run
         async with asyncio.timeout(5):
@@ -172,7 +172,7 @@ async def test_armed_status_neither_confirms_nor_finishes_the_run(tmp_path):
         await client.wait_ready(5)
         while len(client.snapshot.channels) < 8:
             await client.wait_snapshot(after_revision=client.snapshot.revision, timeout=5)
-        await client.start(Recipe(charge_xml(time_ms=3_600_000)), PROFILE)
+        await client.start(Recipe(charge_xml(time_ms=3_600_000)), ADDRESS)
         await asyncio.sleep(0.2)
         assert ADDRESS in client._awaiting  # not confirmed by the armed status
     finally:

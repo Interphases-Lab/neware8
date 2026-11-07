@@ -8,7 +8,8 @@ import pytest
 
 from neware8 import ChannelState, ProtocolError
 from neware8 import messages as msg
-from neware8.measurements import channel_state, current_scale, readings
+from neware8.measurements import channel_state, current_range_a, current_scale, readings
+from neware8.profiles import derive_profiles
 from neware8.protocol import Extended, Frame, FrameReader, Short
 from neware8.session import Session
 from neware8.steps import Comparison, Step, Value, decode_program, encode_program, split_records
@@ -138,6 +139,42 @@ def test_metadata_block_fields():
     block = msg.DeviceInfo.from_body(fragment.body).blocks[0]
     assert block.channel_type == msg.DeviceInfo.MAIN
     assert block.charge_range == -10 and block.current_ranges == (-1, -5, -10)
+
+
+def test_profiles_derive_from_captured_metadata():
+    info = msg.DeviceInfo.from_body(
+        msg.InfoFragment.from_payload(frame(FRAMES["command_0072"]).payload).body
+    )
+    assert {tuple(sorted({u for u, _ in b.channels})) for b in info.blocks} == {
+        (1, 2, 4, 5, 6, 8),
+        (3, 7, 9, 10),
+    }  # block order is not address order
+    profiles, problems = derive_profiles(info)
+    assert problems == [] and len(profiles) == 80
+    # Physical IDs in address order: all 80 entries of the site's manufacturer channel map.
+    assert all(p.physical_id == (a.unit - 1) * 8 + a.channel - 1 for a, p in profiles.items())
+    assert {
+        (p.voltage_rating_v, p.current_rating_a, p.current_scale, p.charge_range_raw)
+        for p in profiles.values()
+    } == {(5.0, 0.01, 10000, -10)}
+
+
+def test_current_range_ratings():
+    assert current_range_a(-10) == 0.01  # seen on hardware
+    assert current_range_a(-10 & 0xFFFFFFFF) == 0.01
+    assert current_range_a(5000) == 5.0
+    assert current_range_a(-10_000_000) == pytest.approx(1e-5)
+    with pytest.raises(ValueError):
+        current_range_a(0)
+
+
+def test_metadata_without_ratings_gives_no_profile():
+    block = bytearray(msg.RangeBlock.SIZE)
+    block[0], block[32] = 0b11, msg.DeviceInfo.MAIN
+    struct.pack_into("<ii", block, 33, -10, -10)  # voltage range 0
+    info = msg.DeviceInfo.from_body(struct.pack("<BH", 0, 1) + bytes(block))
+    profiles, problems = derive_profiles(info)
+    assert profiles == {} and len(problems) == 2 and "voltage_rating_v" in problems[0]
 
 
 def test_multipart_metadata_must_be_consecutive():

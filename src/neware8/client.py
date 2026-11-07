@@ -4,7 +4,7 @@ history delivery.
 
     async with Client(host=..., controller_host=..., history=sink) as client:
         await client.wait_ready()
-        (test,) = await client.start(recipe, profile)
+        test = await client.start(recipe, address)
 
 The controller connects to us. One exchange runs at a time; a write whose reply does not
 arrive is never retried: the connection is closed and the caller gets OperationUncertain.
@@ -29,6 +29,7 @@ from .controller import ControllerInfo, UnitInfo
 from .errors import ConnectionLost, OperationRejected, OperationUncertain, ProtocolError, StateError
 from .history import HistorySink, StartedTest
 from .measurements import readings
+from .profiles import derive_profiles
 from .models import (
     ChannelAddress,
     ChannelProfile,
@@ -82,9 +83,9 @@ class Client:
     """One controller per listener; use separate clients for other controllers.
 
     `history` receives every history batch and must store it durably before the client
-    acknowledges it (see `neware8.history.HistorySink`). `profiles` describe the installed
-    channels; they give the physical mapping of tests started elsewhere and the charge range
-    of records with a zero current range.
+    acknowledges it (see `neware8.history.HistorySink`). Channel profiles (physical ID,
+    ratings, current scale) come from the controller's metadata (`neware8.profiles`);
+    `profiles` override them for channels whose site map or ratings differ.
     """
 
     def __init__(
@@ -121,6 +122,7 @@ class Client:
         self.receive_timeout_s = receive_timeout_s
         self.history = history
         self._configured = {p.address: p for p in profiles}
+        self._profiles: dict[ChannelAddress, ChannelProfile] = dict(self._configured)
 
         self._server: asyncio.Server | None = None
         self._writer: asyncio.StreamWriter | None = None
@@ -144,7 +146,7 @@ class Client:
         self._updated = asyncio.Condition()
 
         self._tests: dict[ChannelAddress, StartedTest] = {}  # started by this client
-        self._charge_ranges = {p.address: p.charge_range_raw for p in profiles}
+        self._charge_ranges: dict[ChannelAddress, int | None] = {}  # of tests started here
         self._starting: set[ChannelAddress] = set()  # start in progress
         self._awaiting: dict[ChannelAddress, StartedTest] = {}  # started, not yet observed
         self._resume_token: int | None = None
@@ -177,6 +179,29 @@ class Client:
     def channels(self) -> tuple[ChannelAddress, ...]:
         """Main channels listed in the controller's metadata."""
         return tuple(sorted(ChannelAddress(*key) for key in self._session.channels))
+
+    @property
+    def profiles(self) -> Mapping[ChannelAddress, ChannelProfile]:
+        """Profiles of the advertised channels and configured overrides.
+
+        Derived from the latest controller metadata; empty until the first discovery.
+        """
+        return MappingProxyType(self._profiles)
+
+    def profile(self, address: ChannelAddress) -> ChannelProfile:
+        """The profile used to compile and start programs on a channel."""
+        profile = self._profiles.get(address)
+        if profile is None:
+            raise StateError(
+                f"channel {address.unit}-{address.channel} has no profile: it is not in the "
+                "controller metadata with usable ratings, and none is configured"
+            )
+        if sum(p.physical_id == profile.physical_id for p in self._profiles.values()) > 1:
+            raise StateError(
+                f"physical ID {profile.physical_id} of channel {address.unit}-{address.channel} "
+                "is shared with another channel; configure distinct physical IDs"
+            )
+        return profile
 
     @property
     def maximum_status_age(self) -> float:
@@ -308,6 +333,28 @@ class Client:
                 self._writer = None
             await self._notify()
 
+    def _adopt_profiles(self, info: msg.DeviceInfo) -> None:
+        derived, problems = derive_profiles(info)
+        for problem in problems:
+            logger.warning("No profile from controller metadata: %s", problem)
+        for address, configured in self._configured.items():
+            advertised = derived.get(address)
+            if advertised is not None and advertised != configured:
+                logger.warning(
+                    "Configured profile differs from controller metadata channel=%s "
+                    "configured=%s advertised=%s",
+                    address,
+                    configured,
+                    advertised,
+                )
+        self._profiles = derived | self._configured
+        logger.info(
+            "Channel profiles channels=%d derived=%d configured=%d",
+            len(info.main_channels()),
+            len(derived),
+            len(self._configured),
+        )
+
     async def _initialize(self) -> None:
         """After metadata: read the controller GUID, let the sink accept it, resend history."""
         await asyncio.wait_for(self._discovered.wait(), 30)
@@ -406,7 +453,8 @@ class Client:
             wire_logger.debug("rx %s %s", self.controller_host, frame.to_bytes().hex())
         for reply in self._session.receive(frame):
             await self._send(reply)
-        if self._session.info is not None:
+        if self._session.info is not None and not self._discovered.is_set():
+            self._adopt_profiles(self._session.info)
             self._discovered.set()
         if frame.reply:
             await self._receive_reply(frame)
@@ -506,9 +554,11 @@ class Client:
             if record.aux:
                 continue
             address = ChannelAddress(frame.unit, record.channel)
-            values = readings(
-                record, self._charge_ranges.get(address), overloaded_energy(record.alarm_code)
+            profile = self._profiles.get(address)
+            charge_range = self._charge_ranges.get(
+                address, profile.charge_range_raw if profile is not None else None
             )
+            values = readings(record, charge_range, overloaded_energy(record.alarm_code))
             status = ChannelStatus(
                 address,
                 record.test_id,
@@ -632,8 +682,9 @@ class Client:
             )
         return status
 
-    def check_start(self, profile: ChannelProfile) -> None:
+    def check_start(self, address: ChannelAddress) -> None:
         """Check start preconditions without sending anything."""
+        profile = self.profile(address)
         if profile.address in self._awaiting:
             raise StateError("channel start is awaiting status confirmation")
         if any(p.physical_id == profile.physical_id for p in self._awaiting.values()):
@@ -646,7 +697,7 @@ class Client:
             if address == profile.address or other.state == ChannelState.FINISHED:
                 continue
             test = self._tests.get(address)
-            configured = self._configured.get(address)
+            configured = self._profiles.get(address)
             physical = (
                 test.physical_id
                 if test is not None and test.test_id == other.test_id
@@ -686,18 +737,18 @@ class Client:
     async def start(
         self,
         recipe: Recipe,
-        profile: ChannelProfile,
+        address: ChannelAddress,
         *,
         on_attempt: Callable[[], Awaitable[None]] | None = None,
     ) -> StartedTest:
         """Start one channel. See start_many."""
-        (test,) = await self.start_many(recipe, (profile,), on_attempt=on_attempt)
+        (test,) = await self.start_many(recipe, (address,), on_attempt=on_attempt)
         return test
 
     async def start_many(
         self,
         recipe: Recipe,
-        profiles: tuple[ChannelProfile, ...],
+        addresses: tuple[ChannelAddress, ...],
         *,
         on_attempt: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[StartedTest, ...]:
@@ -710,7 +761,9 @@ class Client:
         order; confirming the running state from status uploads is the caller's
         responsibility. `on_attempt` runs once, after the readiness checks and before the
         first write, for durable application bookkeeping; it must not call this client.
+        Each channel's program is compiled with `profile(address)`.
         """
+        profiles = tuple(self.profile(address) for address in addresses)
         if not profiles or len({p.address for p in profiles}) != len(profiles):
             raise ValueError("batch requires distinct channel addresses")
         if len({p.address.unit for p in profiles}) != 1:
@@ -723,7 +776,9 @@ class Client:
 
         def check() -> None:
             for profile in profiles:
-                self.check_start(profile)
+                if self.profile(profile.address) != profile:
+                    raise StateError("channel profile changed during the start")
+                self.check_start(profile.address)
 
         async with self._operation:
             check()

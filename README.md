@@ -53,9 +53,9 @@ contents are configured in `pyproject.toml`.
 
 ## Running a measurement
 
-The addresses and ratings below are arguments supplied by your application. A
-physical ID is controller-wide; it is not the logical channel number. Use the
-installation's established mapping. Compilation is offline and sends nothing.
+The client derives each channel's profile (physical ID, voltage and current rating,
+current scale) from the controller's metadata; see [channel profiles](docs/api.md#channel-profiles).
+Compilation is offline and sends nothing.
 
 The application provides a `HistorySink` that stores history durably; the client
 acknowledges a batch to the controller only after the sink committed it (see
@@ -63,28 +63,26 @@ acknowledges a batch to the controller only after the sink committed it (see
 
 ```python
 from pathlib import Path
-from neware8 import ChannelProfile, ChannelState, Client, HistorySink, Recipe
+from neware8 import ChannelAddress, ChannelState, Client, HistorySink, Recipe
 
 
 async def start_measurement(
-    local_ip: str, controller_ip: str, profile: ChannelProfile, xml_path: Path, sink: HistorySink
+    local_ip: str, controller_ip: str, address: ChannelAddress, xml_path: Path, sink: HistorySink
 ) -> None:
     recipe = Recipe.from_file(xml_path)
-    compiled = recipe.compile(profile)
-    print(compiled.step_count, compiled.maximum_duration_s)
-
     async with Client(host=local_ip, controller_host=controller_ip, history=sink) as client:
         await client.wait_ready()
-        test = await client.start(recipe, profile)  # the sink registered test.test_id
-        status = await client.wait_status(profile.address)
+        compiled = recipe.compile(client.profile(address))
+        print(compiled.step_count, compiled.maximum_duration_s)
+        test = await client.start(recipe, address)  # the sink registered test.test_id
+        status = await client.wait_status(address)
         while status.test_id != test.test_id or status.state != ChannelState.FINISHED:
-            status = await client.wait_status(profile.address, after_ns=status.received_at_ns)
+            status = await client.wait_status(address, after_ns=status.received_at_ns)
 ```
 
-Construct a `ChannelProfile` with `address`, `physical_id`, `voltage_rating_v`,
-`current_rating_a` and `current_scale`. `charge_range_raw` is optional and must
-be supplied explicitly when records have zero current-step range. It is a native
-range encoding, not an ampere value.
+To compile without a controller, construct a `ChannelProfile` (`address`, `physical_id`,
+`voltage_rating_v`, `current_rating_a`, `current_scale`, optional `charge_range_raw`, a
+native range encoding).
 
 Calling `start` or `control` explicitly authorizes that library operation. The
 library never asks interactive questions. Application operators remain responsible

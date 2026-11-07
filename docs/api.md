@@ -6,10 +6,11 @@ All network methods belong to the event loop that starts the client. Use one cli
 
 | API | Behaviour |
 |---|---|
-| `Client(host=..., controller_host=..., history=sink, port=8001, profiles=())` | Explicit IP addresses; no site defaults. Port 0 requests an available local port. `profiles` describe the installed channels (physical mapping, charge range). `receive_timeout_s` (60) closes a connection that stays silent; the controller heartbeats about every 17 s. |
+| `Client(host=..., controller_host=..., history=sink, port=8001, profiles=())` | Explicit IP addresses; no site defaults. Port 0 requests an available local port. `profiles` override the derived [channel profiles](#channel-profiles) of channels whose site map or ratings differ. `receive_timeout_s` (60) closes a connection that stays silent; the controller heartbeats about every 17 s. |
 | `async with client` / `await client.listen()` | Listen for the configured controller; reject other peers and duplicate connections. |
 | `await client.wait_ready(timeout=30)` | Wait for completed discovery, a fresh identity query and the sink's `bind`. |
 | `client.channels` | Advertised main-channel addresses after complete multipart discovery. |
+| `client.profiles`, `client.profile(address)` | Channel profiles; `profile` raises `StateError` for a channel without one or with a shared physical ID. |
 | `client.statuses` | Read-only snapshot mapping addresses to immutable status records. |
 | `client.snapshot` | O(1) read of the immutable whole-controller `StatusSnapshot`. |
 | `await client.wait_snapshot(after_revision=..., timeout=20)` | Latest newer snapshot; intermediate revisions can be coalesced. |
@@ -34,23 +35,46 @@ for status in snapshot.channels:
     print(status.address, status.voltage_v, status.current_a, status.age_s)
 ```
 
+## Channel profiles
+
+A `ChannelProfile` holds what compiling and starting a program needs: the physical ID, the
+voltage and current rating, the current scale and the charge range. The client derives one
+for every advertised main channel from the controller's metadata (`neware8.profiles`), as
+the manufacturer client does (code-derived):
+
+| Field | From the metadata | Our controller |
+|---|---|---|
+| `physical_id` | index in address order (unit 1 channel 1 is 0) | 0..79 |
+| `voltage_rating_v` | voltage range, in V | 5 |
+| `current_rating_a` | charge range (`Unit.GetCurrRange`) | 0.01 |
+| `current_scale` | charge range (`Unit.GetCurrScale`) | 10000 |
+| `charge_range_raw` | charge range | −10 |
+
+The physical IDs are the manufacturer's default channel map; the site's map uses it for all
+80 channels (observed). The manufacturer software lets users change the map, which the
+controller cannot report. Configure `profiles` for channels whose map or ratings differ; a
+configured profile replaces the derived one, and a difference is logged at discovery.
+Channels whose metadata gives no rating (for example a voltage range of 0) have a profile
+only if one is configured. Only the −10 range encoding has been seen on hardware;
+parallel channels (whose range the manufacturer widens) are not supported.
+
 ## Recipes and control
 
 `Recipe.from_file(path)` accepts `.xml` only. `Recipe(xml_bytes)` accepts original XML bytes. `compile(profile)` returns immutable native bytes, the source digest, step count and maximum duration, without opening a connection.
 
-`await client.start(recipe, profile)` serializes the mapping, auxiliary, program, protection, start and confirmation exchanges, and returns the `StartedTest`. It requires:
+`await client.start(recipe, address)` compiles the program with `client.profile(address)` and serializes the mapping, auxiliary, program, protection, start and confirmation exchanges, and returns the `StartedTest`. It requires:
 
 - complete discovery
 - a status within `upload_interval_raw * missed_upload_intervals` seconds
 - a finished target channel
 
-A retained diagnostic code on a finished target does not prevent starting; it remains available in status. Other active channels must have known physical mappings, fresh status, no unresolved alarms and distinct physical IDs. Supply configured profiles for channels started elsewhere. Download replies must match the requested GUID, target and fragment. The device-assigned TestID is registered with the sink in the Start reply, before any later frame is read, so history of the new test cannot arrive before the sink knows it.
+A retained diagnostic code on a finished target does not prevent starting; it remains available in status. Other active channels must have profiles, fresh status, no unresolved alarms and distinct physical IDs; a test started elsewhere is assumed to use the channel's profile. Download replies must match the requested GUID, target and fragment. The device-assigned TestID is registered with the sink in the Start reply, before any later frame is read, so history of the new test cannot arrive before the sink knows it.
 
-`await client.start_many(recipe, profiles)` sends one masked start for distinct channels in the same unit. Every profile is validated and must compile to the same native program; different programs or units are rejected before any write. Each channel gets its own controller-assigned TestID, returned in input order. Masks are covered by synthetic handshake tests; multi-channel hardware acceptance remains outstanding. The API acknowledges the native sequence; callers confirm live status separately.
+`await client.start_many(recipe, addresses)` sends one masked start for distinct channels in the same unit. Every channel's profile is validated and must compile to the same native program; different programs or units are rejected before any write. Each channel gets its own controller-assigned TestID, returned in input order. Masks are covered by synthetic handshake tests; multi-channel hardware acceptance remains outstanding. The API acknowledges the native sequence; callers confirm live status separately.
 
 Starts awaiting matching status reserve their physical channels. A status that reports the new TestID while the start sequence is still in progress (an armed, not yet confirmed channel) does not confirm the start.
 
-`client.check_start(profile)` checks readiness without writes; `start` repeats these checks under its operation lock. Optional async `on_attempt` runs once, after the readiness checks and before the first write, for durable application bookkeeping. It must not call another operation on this client. Cancellation or failure of that callback prevents transmission. Explicit rejection after an attempt begins leaves no started test; uncertain transmission must be reconciled, never retried blindly.
+`client.check_start(address)` checks readiness without writes; `start` repeats these checks under its operation lock. Optional async `on_attempt` runs once, after the readiness checks and before the first write, for durable application bookkeeping. It must not call another operation on this client. Cancellation or failure of that callback prevents transmission. Explicit rejection after an attempt begins leaves no started test; uncertain transmission must be reconciled, never retried blindly.
 
 `await client.control(address, Control.STOP, expected_test_id=observed_test_id)` stops the selected channel, whichever client started its test. Clear Flag, Continue and Jump use the same channel-addressed API:
 

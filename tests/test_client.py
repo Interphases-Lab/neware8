@@ -9,6 +9,7 @@ import pytest
 import neware8.client
 from neware8 import (
     ChannelAddress,
+    ChannelProfile,
     ChannelState,
     Client,
     Control,
@@ -78,7 +79,7 @@ def test_connect_discovers_channels_and_binds_the_sink(tmp_path):
 def test_start_follows_the_manufacturer_sequence(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             requests = [(f.extended, f.command) for f in fake.received if not f.reply]
             assert requests == [
                 (True, Extended.GET_CONTROLLER_SERIAL),
@@ -95,7 +96,7 @@ def test_start_follows_the_manufacturer_sequence(tmp_path):
             await wait_state(client, ChannelState.RUNNING)
             assert list(client.history.tests.values()) == [started]
             with pytest.raises(StateError, match="finished channel"):
-                client.check_start(PROFILE)
+                client.check_start(ADDRESS)
 
     run(check())
 
@@ -104,7 +105,7 @@ def test_rejected_start_registers_no_test(tmp_path):
     async def check():
         async with connected(tmp_path, reject={(True, Extended.START): 1}) as (client, fake):
             with pytest.raises(OperationRejected):
-                await client.start(Recipe(XML), PROFILE)
+                await client.start(Recipe(XML), ADDRESS)
             assert client.history.tests == {}
             assert not fake.channels[1, 1].armed
 
@@ -117,7 +118,7 @@ def test_missing_reply_is_uncertain_and_never_retried(tmp_path, monkeypatch):
     async def check():
         async with connected(tmp_path, silent={(True, Extended.START)}) as (client, fake):
             with pytest.raises(OperationUncertain):
-                await client.start(Recipe(XML), PROFILE)
+                await client.start(Recipe(XML), ADDRESS)
             assert len(fake.sent(True, Extended.START)) == 1
             assert len(fake.sent(True, Extended.CONFIRM_START)) == 0
             await asyncio.sleep(0.1)
@@ -129,7 +130,7 @@ def test_missing_reply_is_uncertain_and_never_retried(tmp_path, monkeypatch):
 def test_controls_wait_for_the_state_change(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             test_id = started.test_id
             await client.control(ADDRESS, Control.STOP, expected_test_id=test_id)
@@ -153,7 +154,7 @@ def test_controls_wait_for_the_state_change(tmp_path):
 def test_rejected_stop_with_empty_reply(tmp_path):
     async def check():
         async with connected(tmp_path, reject={(False, Short.STOP): 1}) as (client, fake):
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             with pytest.raises(OperationRejected):
                 await client.control(ADDRESS, Control.STOP, expected_test_id=started.test_id)
@@ -165,7 +166,7 @@ def test_rejected_stop_with_empty_reply(tmp_path):
 def test_history_is_committed_before_it_is_acknowledged(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             fake.history(
                 77,
@@ -216,7 +217,7 @@ def test_settings_and_information(tmp_path):
             unit = await client.unit_info(1)
             assert (unit.serial_number, unit.version) == ("UNIT00000001", "UNIT_1.0")
             assert await client.history_minimum_index() == 100
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             assert started.test_id == 0xA8003001
             await wait_state(client, ChannelState.RUNNING)
             with pytest.raises(StateError, match="finished and alarm-free"):
@@ -249,7 +250,7 @@ async def sequences(client, test):
 def test_resume_history_waits_for_the_requested_batch(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
-            await client.start(Recipe(XML), PROFILE)
+            await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             fake.record([fake.history_record(1, 1, s) for s in (1, 2, 3)])
             token = fake.log.token(2)
@@ -268,7 +269,7 @@ def test_explicit_resume_requires_the_requested_batch(tmp_path, monkeypatch):
 
     async def check():
         async with connected(tmp_path) as (client, fake):
-            await client.start(Recipe(XML), PROFILE)
+            await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             fake.record([fake.history_record(1, 1, 1)])
             await until(lambda: fake.acks)
@@ -282,7 +283,7 @@ def test_explicit_resume_requires_the_requested_batch(tmp_path, monkeypatch):
 def test_reconnect_resends_history_lost_in_flight(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, first):
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             first.record([first.history_record(1, 1, s) for s in (1, 2)])
             await until(lambda: first.log.token(0) in first.acks)
@@ -319,7 +320,7 @@ def test_reconnect_without_a_checkpoint_sends_no_resend(tmp_path):
 def test_expired_checkpoint_replays_oldest_history(tmp_path, caplog):
     async def check():
         async with connected(tmp_path) as (client, first):
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             first.record([first.history_record(1, 1, s) for s in (1, 2)])
             await until(lambda: first.acks)
@@ -341,7 +342,7 @@ def test_expired_checkpoint_replays_oldest_history(tmp_path, caplog):
 def test_skipped_history_is_logged_once(tmp_path, caplog):
     async def check():
         async with connected(tmp_path) as (client, fake):
-            await client.start(Recipe(XML), PROFILE)
+            await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             first = [fake.history_record(1, 1, s) for s in (1, 2)]
             fake.history(fake.log.token(0), first)
@@ -412,7 +413,7 @@ def test_silent_controller_is_dropped_so_it_can_reconnect(tmp_path):
 def test_continue_after_a_protection_stop_needs_the_alarm_acknowledged(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             fake.protect(1, 1, alarm=501)
             await wait_state(client, ChannelState.PROTECTED)
@@ -444,7 +445,7 @@ def test_continue_after_a_protection_stop_needs_the_alarm_acknowledged(tmp_path)
 def test_continue_that_protects_again_reports_the_new_alarm(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
-            started = await client.start(Recipe(XML), PROFILE)
+            started = await client.start(Recipe(XML), ADDRESS)
             await wait_state(client, ChannelState.RUNNING)
             fake.protect(1, 1, alarm=501)
             await wait_state(client, ChannelState.PROTECTED)
@@ -458,5 +459,58 @@ def test_continue_that_protects_again_reports_the_new_alarm(tmp_path):
                 )
             assert client.connected  # a certain outcome keeps the session
             assert client.snapshot.get(ADDRESS).alarm_code == 503
+
+    run(check())
+
+
+def test_profiles_come_from_metadata_and_configured_ones_override_them(tmp_path):
+    async def check():
+        override = ChannelProfile(ChannelAddress(1, 2), 40, 4.2, 0.005, 10000, -10)
+        client = Client(
+            host="127.0.0.1",
+            controller_host="127.0.0.1",
+            history=MemorySink(),
+            port=0,
+            profiles=(override,),
+        )
+        assert dict(client.profiles) == {override.address: override}  # before discovery
+        await client.listen()
+        fake = FakeController(client.listening_port)
+        await fake.connect()
+        try:
+            await client.wait_ready(5)
+            assert client.profile(ADDRESS) == PROFILE  # derived
+            assert client.profile(override.address) == override
+            assert sorted(p.physical_id for p in client.profiles.values()) == [0, *range(2, 8), 40]
+            with pytest.raises(StateError, match="no profile"):
+                client.profile(ChannelAddress(2, 1))
+        finally:
+            await fake.close()
+            await client.close()
+
+    run(check())
+
+
+def test_a_configured_physical_id_that_collides_blocks_both_channels(tmp_path):
+    async def check():
+        client = Client(
+            host="127.0.0.1",
+            controller_host="127.0.0.1",
+            history=MemorySink(),
+            port=0,
+            profiles=(ChannelProfile(ChannelAddress(1, 2), 0, 5.0, 0.01, 10000, -10),),
+        )
+        await client.listen()
+        fake = FakeController(client.listening_port)
+        await fake.connect()
+        try:
+            await client.wait_ready(5)
+            for address in (ADDRESS, ChannelAddress(1, 2)):
+                with pytest.raises(StateError, match="physical ID 0"):
+                    client.profile(address)
+            assert client.profile(ChannelAddress(1, 3)).physical_id == 2
+        finally:
+            await fake.close()
+            await client.close()
 
     run(check())

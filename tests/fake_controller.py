@@ -128,7 +128,7 @@ class FakeController:
         for unit in range(self.units):
             block[unit] = (1 << self.channels_per_unit) - 1
         block[32] = msg.DeviceInfo.MAIN
-        struct.pack_into("<ii", block, 33, -10, -10)
+        struct.pack_into("<iiI", block, 33, -10, -10, 5)
         block[99:115] = GUID
         header = struct.pack("<H6sBBB", 0x75, b"Neware", 7, 2, 1)
         return header + struct.pack("<BH", 0, 1) + bytes(block)
