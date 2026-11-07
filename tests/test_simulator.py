@@ -118,7 +118,7 @@ async def test_capacity_protection_stops_the_channel_with_an_alarm(tmp_path):
 @synchronous
 async def test_stop_continue_and_clear_flag(tmp_path):
     async with simulated(tmp_path, time_scale=10) as (client, _):
-        await client.start(Recipe(charge_xml(time_ms=3_600_000)), PROFILE)
+        run = await client.start(Recipe(charge_xml(time_ms=3_600_000)), PROFILE)
         await wait_state(client, run.test_id, ChannelState.RUNNING)
 
         await client.control(ADDRESS, Control.STOP, expected_test_id=run.test_id)
