@@ -36,7 +36,7 @@ Run development commands through uv:
 
 ```shell
 uv run --locked pytest
-uv run --locked mypy
+uv run --locked ty check
 uv run --locked ruff check .
 uv run --locked ruff format --check src tests
 uv build

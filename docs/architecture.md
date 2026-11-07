@@ -26,7 +26,7 @@ flowchart LR
 | `storage.py`, `_bdf.py`, `_counters.py` | Durable runs, BDF export, capacity/energy totals. |
 | `models.py`, `controller.py`, `errors.py` | Public value types and errors. |
 
-The protocol modules are pure and typed (strict mypy covers the whole package). They are
+The protocol modules are pure and typed (ty checks the package and tests; ruff requires annotations). They are
 importable for diagnostics, but only the names exported from `neware8` are a stable API.
 
 ## Exchanges

@@ -63,6 +63,7 @@ def test_each_record_uses_its_range_including_automatic_range_changes():
     same = totals.update(record(2, 1, (1000, 0, 2000, 0), raw_range=-5))
     assert first == same
     last = totals.update(record(3, 1, (2000, 0, 4000, 0), raw_range=-5))
+    assert first["charging_capacity_ah"] is not None
     assert last["charging_capacity_ah"] == 2 * first["charging_capacity_ah"]
     with pytest.raises(ValueError, match="explicit channel range"):
         CounterTotals(None).update(record(1, 1, (0, 0, 0, 0), raw_range=0))

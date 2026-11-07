@@ -1,7 +1,7 @@
 """Transactional current-run recording and bounded-memory BDF Parquet export."""
 
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 import copy
 from dataclasses import replace
@@ -17,7 +17,6 @@ import time
 from uuid import UUID, uuid4
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .measurements import current_scale
@@ -101,7 +100,7 @@ class MeasurementStore:
             raise
 
     @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
+    def _transaction(self) -> Generator[sqlite3.Connection]:
         with self._lock:
             if self._closed:
                 raise StorageError("measurement store is closed")
@@ -119,7 +118,7 @@ class MeasurementStore:
                 self._closed = True
 
     @contextmanager
-    def _snapshot(self) -> Iterator[sqlite3.Connection]:
+    def _snapshot(self) -> Generator[sqlite3.Connection]:
         with self._lock:
             if self._closed:
                 raise StorageError("measurement store is closed")
@@ -444,8 +443,7 @@ class MeasurementStore:
                     groups.append(group)
                     continue
                 table = parquet.read_row_group(group, columns=["step_record_index"])
-                starts = pc.sum(pc.equal(table["step_record_index"], 1)).as_py()
-                step_count += int(starts or 0)
+                step_count += table["step_record_index"].to_pylist().count(1)
             for batch in parquet.iter_batches(batch_size=4096, columns=columns, row_groups=groups):
                 for item in batch.to_pylist():
                     sequence = item["record_index"]
