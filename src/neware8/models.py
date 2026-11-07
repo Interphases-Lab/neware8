@@ -180,6 +180,15 @@ class Export:
 
 @dataclass(frozen=True, slots=True)
 class RecordedPoint:
+    """One recorded main-channel sample.
+
+    The totals accumulate the device's step counters since the test started, as in the BDF
+    export (see docs/storage.md). They are None when unknown: after a sequence gap or a missing
+    test beginning, or when the current scale cannot be resolved. `step_count` is the number of
+    step executions observed since the test started, including the current one; it is None
+    after a gap, because a step change could be hidden in it.
+    """
+
     sequence: int
     test_time_second: float
     voltage_volt: float
@@ -187,6 +196,11 @@ class RecordedPoint:
     cycle: int
     step_id: int
     raw: bytes
+    charging_capacity_ah: float | None = None
+    discharging_capacity_ah: float | None = None
+    charging_energy_wh: float | None = None
+    discharging_energy_wh: float | None = None
+    step_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

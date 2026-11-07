@@ -1,3 +1,4 @@
+import struct
 import sqlite3
 from dataclasses import replace
 from unittest.mock import patch
@@ -222,3 +223,65 @@ def test_replacement_removes_all_managed_exports_but_other_channels_survive(stor
     assert not custom.exists()
     assert other.exists()
     assert store.get(second.id).test_id == 2
+
+
+def _with_counters(payload: bytes, charge: int, discharge: int) -> bytes:
+    """Set a one-record batch's step capacity and energy counters (raw device units)."""
+    raw = bytearray(payload)
+    struct.pack_into("<qqqq", raw, 5 + 43, charge, discharge, charge * 4, discharge * 4)
+    return bytes(raw)
+
+
+MAH = 36_000_000  # one mAh in raw counter units at the captured record's current range
+
+
+def _totals_run(store):
+    run = store.begin(PROFILE, 1, XML)
+    steps = [(1, 1, 0, 0), (2, 1, MAH, 0), (3, 2, 0, 0), (4, 2, 0, 2 * MAH)]
+    for sequence, step, charge, discharge in steps:
+        payload = history_payload(
+            sequence=sequence, step_id=step, step_change_count=step, time_ms=sequence * 1000
+        )
+        store.append(batch(_with_counters(payload, charge, discharge)), (run.id,))
+    return run
+
+
+def _totals(points):
+    return [
+        (
+            point.sequence,
+            point.charging_capacity_ah,
+            point.discharging_capacity_ah,
+            point.charging_energy_wh,
+            point.step_count,
+        )
+        for point in points
+    ]
+
+
+def test_read_reports_test_totals_and_step_count(store):
+    run = _totals_run(store)
+    expected = [
+        (1, 0.0, 0.0, 0.0, 1),
+        (2, 0.001, 0.0, 0.004, 1),
+        (3, 0.001, 0.0, 0.004, 2),
+        (4, 0.001, 0.002, 0.004, 2),
+    ]
+    assert _totals(store.read(run.id)) == pytest.approx(expected)
+    paged = store.read(run.id, limit=2) + store.read(run.id, after_sequence=2)
+    assert _totals(paged) == pytest.approx(expected)
+    store._cursors.clear()  # recomputed from the first record when not cached
+    assert _totals(store.read(run.id, after_sequence=3)) == pytest.approx(expected[3:])
+
+
+def test_totals_after_a_gap_are_unknown_and_archive_matches_live(store):
+    run = _totals_run(store)
+    gap = history_payload(sequence=6, step_id=2, step_change_count=2, time_ms=6000)
+    store.append(batch(gap), (run.id,))
+    live = store.read(run.id)
+    assert live[-1].step_count is None and live[-1].charging_capacity_ah is None
+    store.set_state(run.id, RunState.FINISHED)
+    store.finalize(run.id)
+    archived = store.read(run.id)
+    assert _totals(archived) == pytest.approx(_totals(live), nan_ok=True)
+    assert _totals(store.read(run.id, after_sequence=2)) == _totals(archived[2:])

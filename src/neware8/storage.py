@@ -1,7 +1,9 @@
 """Transactional current-run recording and bounded-memory BDF Parquet export."""
 
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+import copy
 from dataclasses import replace
 import logging
 import json
@@ -15,12 +17,13 @@ import time
 from uuid import UUID, uuid4
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .measurements import current_scale
 from .messages import HistoryBatch, HistoryRecord
 from . import _bdf
-from ._counters import CounterTotals
+from ._counters import TEST_TOTALS, CounterTotals, RunningTotals
 from .errors import StateError, StorageError
 from .models import (
     ChannelAddress,
@@ -37,6 +40,9 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+MAX_CURSORS = 64
+"""Resumable totals positions kept in memory, so paged reads need not start from record 1."""
+
 
 class MeasurementStore:
     """One controller's latest run per channel, including its managed export files."""
@@ -46,6 +52,7 @@ class MeasurementStore:
         self.directory.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._export_lock = threading.RLock()
+        self._cursors: OrderedDict[tuple[str, int], RunningTotals] = OrderedDict()
         self._db = sqlite3.connect(self.directory / "measurements.sqlite", check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA foreign_keys=ON")
@@ -158,6 +165,7 @@ class MeasurementStore:
                     (previous[1],),
                 )
                 db.execute("DELETE FROM exports WHERE run_id=?", (previous[1],))
+                self._forget_cursors(previous[1])
             db.execute(
                 "DELETE FROM runs WHERE unit=? AND channel=?", (address.unit, address.channel)
             )
@@ -195,6 +203,7 @@ class MeasurementStore:
                 )
                 db.execute("DELETE FROM exports WHERE run_id=?", (row[0],))
                 db.execute("DELETE FROM runs WHERE id=?", (row[0],))
+                self._forget_cursors(row[0])
         self._purge_exports()
 
     def _purge_exports(self) -> None:
@@ -314,6 +323,8 @@ class MeasurementStore:
                     (prior.backfill if prior else False) or sequence <= highwater[run_id],
                 )
         for change in changed.values():
+            if change.backfill:
+                self._forget_cursors(change.run_id)
             logger.debug(
                 "History committed run_id=%s first_sequence=%d last_sequence=%d backfill=%s",
                 change.run_id,
@@ -354,13 +365,55 @@ class MeasurementStore:
             archive = db.execute("SELECT path FROM archives WHERE run_id=?", (run_id,)).fetchone()
             if archive is not None:
                 return self._archived_points(archive[0], after_sequence, limit)
+            totals = self._cursor(db, run_id, row[0], after_sequence)
             points = []
             try:
-                for point, _ in self._points(db, run_id, row[0], after_sequence, limit):
-                    points.append(point)
+                for point, record in self._points(db, run_id, row[0], after_sequence, limit):
+                    values, step_count = totals.update(record)
+                    points.append(
+                        replace(
+                            point,
+                            charging_capacity_ah=values["charging_capacity_ah"],
+                            discharging_capacity_ah=values["discharging_capacity_ah"],
+                            charging_energy_wh=values["charging_energy_wh"],
+                            discharging_energy_wh=values["discharging_energy_wh"],
+                            step_count=step_count,
+                        )
+                    )
             except _bdf.PendingRecordTime:
                 pass
+            self._remember_cursor(run_id, totals)
             return tuple(points)
+
+    def _cursor(
+        self, db: sqlite3.Connection, run_id: str, charge_range: int | None, after_sequence: int
+    ) -> RunningTotals:
+        """Totals positioned just after `after_sequence`, from the cache or recomputed."""
+        cached = self._cursors.get((run_id, after_sequence))
+        if cached is not None:
+            self._cursors.move_to_end((run_id, after_sequence))
+            return copy.deepcopy(cached)
+        totals = RunningTotals(charge_range)
+        if after_sequence == 0:
+            return totals
+        cursor = db.execute(
+            "SELECT raw FROM records WHERE run_id=? AND sequence<=? ORDER BY sequence",
+            (run_id, after_sequence),
+        )
+        for batch in iter(lambda: cursor.fetchmany(4096), []):
+            for (raw,) in batch:
+                totals.update(HistoryRecord.from_bytes(raw))
+        return totals
+
+    def _remember_cursor(self, run_id: str, totals: RunningTotals) -> None:
+        self._cursors[(run_id, totals.sequence)] = copy.deepcopy(totals)
+        self._cursors.move_to_end((run_id, totals.sequence))
+        while len(self._cursors) > MAX_CURSORS:
+            self._cursors.popitem(last=False)
+
+    def _forget_cursors(self, run_id: str) -> None:
+        for key in [key for key in self._cursors if key[0] == run_id]:
+            del self._cursors[key]
 
     @staticmethod
     def _archived_points(path: str, after_sequence: int, limit: int) -> tuple[RecordedPoint, ...]:
@@ -372,10 +425,15 @@ class MeasurementStore:
             "current_ampere",
             "cycle_count",
             "step_id",
+            "step_record_index",
+            *TEST_TOTALS,
         ]
         with pq.ParquetFile(path) as parquet:
             index = parquet.schema_arrow.get_field_index("record_index")
-            groups = []
+            groups: list[int] = []
+            # Step executions and contiguity of the skipped leading groups, counted vectorized.
+            step_count: int | None = 0
+            previous_sequence = 0
             for group in range(parquet.num_row_groups):
                 metadata = parquet.metadata.row_group(group)
                 if not metadata.num_rows:
@@ -383,21 +441,41 @@ class MeasurementStore:
                 statistics = metadata.column(index).statistics
                 if statistics is None or not statistics.has_min_max:
                     raise StorageError("finalized archive is missing record index statistics")
-                if statistics.max > after_sequence:
+                if statistics.max > after_sequence or groups:
                     groups.append(group)
+                    continue
+                table = parquet.read_row_group(group, columns=["step_record_index"])
+                first, last = statistics.min, statistics.max
+                if first != previous_sequence + 1 or last - first + 1 != table.num_rows:
+                    step_count = None
+                elif step_count is not None:
+                    starts = pc.sum(pc.equal(table["step_record_index"], 1)).as_py()
+                    step_count += int(starts or 0)
+                previous_sequence = last
             for batch in parquet.iter_batches(batch_size=4096, columns=columns, row_groups=groups):
                 for item in batch.to_pylist():
-                    if item["record_index"] <= after_sequence:
+                    sequence = item["record_index"]
+                    if sequence != previous_sequence + 1:
+                        step_count = None
+                    elif step_count is not None and item["step_record_index"] == 1:
+                        step_count += 1
+                    previous_sequence = sequence
+                    if sequence <= after_sequence:
                         continue
                     points.append(
                         RecordedPoint(
-                            item["record_index"],
+                            sequence,
                             item["test_time_second"],
                             item["voltage_volt"],
                             item["current_ampere"],
                             item["cycle_count"],
                             item["step_id"],
                             b"",
+                            charging_capacity_ah=item["charging_capacity_ah"],
+                            discharging_capacity_ah=item["discharging_capacity_ah"],
+                            charging_energy_wh=item["charging_energy_wh"],
+                            discharging_energy_wh=item["discharging_energy_wh"],
+                            step_count=step_count,
                         )
                     )
                     if len(points) == limit:
@@ -458,6 +536,7 @@ class MeasurementStore:
                 )
                 db.execute("DELETE FROM records WHERE run_id=?", (run_id,))
                 db.execute("DELETE FROM opaque_records WHERE run_id=?", (run_id,))
+            self._forget_cursors(run_id)
             return result
 
     def export(self, run_id: str, path: str | Path | None = None) -> Export:

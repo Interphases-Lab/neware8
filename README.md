@@ -133,7 +133,7 @@ retention limits and final completeness remain unknown.
 - [Storage, BDF mapping and retention](docs/storage.md)
 - [Protocol specification](docs/protocol/README.md)
 - [Corrections and open questions](docs/protocol/evidence.md)
-- [Validation](docs/testing.md)
+- [Validation and the simulated controller](docs/testing.md)
 
 The supported XML subset includes protected CC/CV/CCCV charge/discharge, rest,
 finite cycles and End. Unsupported XML settings fail explicitly. Auxiliary

@@ -127,8 +127,14 @@ or an unexpected decrease within a step make the affected quantity unknown for
 that step and any dependent totals; unaffected quantities remain available.
 Unknown values are null, never zero-filled or silently rebased. A later export
 recalculates from the SQLite snapshot, so filling a history gap restores totals.
-The API's recorded-point pages remain voltage/current/time records; the full
-capacity and energy series are provided by BDF exports, including mid-run exports.
+The API's recorded-point pages carry the whole-test totals (`charging_capacity_ah`,
+`discharging_capacity_ah`, `charging_energy_wh`, `discharging_energy_wh`) and the number of
+step executions observed (`step_count`), with the same accumulation and the same
+unknown-after-a-gap rule as the export. Pages of a live run keep a small in-memory cache of
+resumable positions, so continuing from the last returned sequence does not recompute the
+run from its first record; late history that fills a gap drops the cache. Pages of a
+finalized run read the totals from the archive. Step and cycle totals, and the derived net
+and cumulative quantities, are provided by BDF exports, including mid-run exports.
 
 See [recorded counter checks](protocol/counters.md) for the observed reset behavior
 and portable fixtures.
