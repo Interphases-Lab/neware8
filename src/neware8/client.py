@@ -1,13 +1,15 @@
 """
 Asyncio client for one BTS82 controller: listener, status cache, serialized control and
-history recording.
+history delivery.
 
-    async with Client(host=..., controller_host=..., storage_directory=...) as client:
+    async with Client(host=..., controller_host=..., history=sink) as client:
         await client.wait_ready()
-        run = await client.start(recipe, profile)
+        (test,) = await client.start(recipe, profile)
 
 The controller connects to us. One exchange runs at a time; a write whose reply does not
 arrive is never retried: the connection is closed and the caller gets OperationUncertain.
+History is acknowledged only after the application's `HistorySink` committed it; the client
+keeps no measurement data of its own.
 """
 
 import asyncio
@@ -18,15 +20,14 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from datetime import datetime
-from pathlib import Path
 from types import MappingProxyType
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from . import messages as msg
-from ._bdf import PendingRecordTime
 from .alarms import alarm_info, overloaded_energy
 from .controller import ControllerInfo, UnitInfo
 from .errors import ConnectionLost, OperationRejected, OperationUncertain, ProtocolError, StateError
+from .history import HistorySink, StartedTest
 from .measurements import readings
 from .models import (
     ChannelAddress,
@@ -34,12 +35,6 @@ from .models import (
     ChannelState,
     ChannelStatus,
     Control,
-    Export,
-    RecordChange,
-    RecordedPoint,
-    RecordRevision,
-    Run,
-    RunState,
     StatusSnapshot,
     StepType,
     bounded_integer,
@@ -48,7 +43,6 @@ from .protocol import CONTROLLER_UNIT, Extended, Frame, FrameReader, Short, chan
 from .recipe import Recipe
 from .session import ACKNOWLEDGED_UNHANDLED, Session
 from .steps import split_records
-from .storage import MeasurementStore
 
 logger = logging.getLogger(__name__)
 wire_logger = logging.getLogger("neware8.wire")
@@ -85,19 +79,24 @@ CLEARABLE = {
 
 
 class Client:
-    """One controller per listener and storage directory; use separate clients for others."""
+    """One controller per listener; use separate clients for other controllers.
+
+    `history` receives every history batch and must store it durably before the client
+    acknowledges it (see `neware8.history.HistorySink`). `profiles` describe the installed
+    channels; they give the physical mapping of tests started elsewhere and the charge range
+    of records with a zero current range.
+    """
 
     def __init__(
         self,
         *,
         host: str,
         controller_host: str,
-        storage_directory: str | Path,
+        history: HistorySink,
         port: int = 8001,
         profiles: tuple[ChannelProfile, ...] = (),
         upload_interval_raw: int = 5,
         missed_upload_intervals: float = 3,
-        history_grace_period_s: float = 30,
         receive_timeout_s: float = 60,
     ) -> None:
         ipaddress.ip_address(host)
@@ -110,7 +109,6 @@ class Client:
             raise ValueError("configured channel addresses and physical IDs must be unique")
         for name, value in (
             ("missed_upload_intervals", missed_upload_intervals),
-            ("history_grace_period_s", history_grace_period_s),
             ("receive_timeout_s", receive_timeout_s),
         ):
             if not math.isfinite(value) or value <= 0:
@@ -118,18 +116,17 @@ class Client:
         self.host, self.controller_host, self.port = host, controller_host, port
         self.upload_interval_raw = upload_interval_raw
         self.missed_upload_intervals = missed_upload_intervals
-        self.history_grace_period_s = history_grace_period_s
         # The controller sends a heartbeat about every 17 s; like the manufacturer server we
         # drop a silent connection so that the controller's reconnect is not refused.
         self.receive_timeout_s = receive_timeout_s
-        self.store = MeasurementStore(storage_directory)
+        self.history = history
         self._configured = {p.address: p for p in profiles}
 
         self._server: asyncio.Server | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._peer_task: asyncio.Task[None] | None = None
         self._session = Session()
-        self._bound = False  # controller identity verified and storage bound
+        self._bound = False  # controller identity verified and accepted by the sink
         self._closed = False
         self._error: BaseException | None = None
         self._ready = asyncio.Event()
@@ -146,21 +143,15 @@ class Client:
         self._snapshot = StatusSnapshot(0, time.time_ns(), False, ())
         self._updated = asyncio.Condition()
 
-        self._runs: dict[ChannelAddress, Run] = {}
-        self._charge_ranges: dict[ChannelAddress, int | None] = {}
-        self._eligible: set[str] = set()  # runs whose history is recorded
+        self._tests: dict[ChannelAddress, StartedTest] = {}  # started by this client
+        self._charge_ranges = {p.address: p.charge_range_raw for p in profiles}
         self._starting: set[ChannelAddress] = set()  # start in progress
-        self._awaiting: dict[ChannelAddress, ChannelProfile] = {}  # started, not yet observed
-        self._exports: dict[str, asyncio.Task[None]] = {}
-        self._dirty_exports: set[str] = set()
+        self._awaiting: dict[ChannelAddress, StartedTest] = {}  # started, not yet observed
         self._resume_token: int | None = None
         self._resume_acknowledged = False
         self._resume_strict = True  # explicit resume: only the requested batch is accepted
         self._resume_first: asyncio.Future[None] | None = None
         self._history_next: int | None = None  # expected position of the next batch
-        self._record_revision = 0
-        self._record_versions: Mapping[str, RecordRevision] = MappingProxyType({})
-        self._records_changed = asyncio.Condition()
 
     # ------------------------------------------------------------------ #
     # Properties and waiting
@@ -197,20 +188,6 @@ class Client:
             raise StateError("listener is not running")
         return int(self._server.sockets[0].getsockname()[1])
 
-    @property
-    def exporting_channels(self) -> tuple[ChannelAddress, ...]:
-        """Channels blocked by finalization, including the late-history grace period."""
-        return tuple(run.address for run in self._runs.values() if run.id in self._exports)
-
-    @property
-    def record_revision(self) -> int:
-        return self._record_revision
-
-    @property
-    def record_versions(self) -> Mapping[str, RecordRevision]:
-        """Process-local revisions of retained runs; reset revisions mark backfills."""
-        return self._record_versions
-
     async def wait_ready(self, timeout: float = 30) -> None:
         await asyncio.wait_for(self._ready.wait(), timeout)
         if not self.connected:
@@ -242,15 +219,6 @@ class Client:
                     raise ConnectionLost("controller is disconnected")
                 await self._updated.wait()
 
-    async def wait_records(self, *, after_revision: int, timeout: float = 30) -> int:
-        bounded_integer("after_revision", after_revision, 2**63 - 1)
-        async with asyncio.timeout(timeout), self._records_changed:
-            while self._record_revision <= after_revision:
-                if self._closed:
-                    raise ConnectionLost("client is closed")
-                await self._records_changed.wait()
-            return self._record_revision
-
     async def _notify(self) -> None:
         async with self._updated:
             self._updated.notify_all()
@@ -262,24 +230,6 @@ class Client:
             self.connected,
             tuple(self._statuses[address] for address in sorted(self._statuses)),
         )
-
-    async def _notify_records(self, changes: tuple[RecordChange, ...] = ()) -> None:
-        self._record_revision += 1
-        active = {run.id for run in self._runs.values()}
-        versions = {key: value for key, value in self._record_versions.items() if key in active}
-        for key in active - versions.keys():
-            versions[key] = RecordRevision(self._record_revision, self._record_revision)
-        for change in changes:
-            if change.run_id in versions:
-                reset = (
-                    self._record_revision
-                    if change.backfill
-                    else versions[change.run_id].reset_revision
-                )
-                versions[change.run_id] = RecordRevision(self._record_revision, reset)
-        self._record_versions = MappingProxyType(versions)
-        async with self._records_changed:
-            self._records_changed.notify_all()
 
     # ------------------------------------------------------------------ #
     # Connection
@@ -320,7 +270,6 @@ class Client:
         self._session = Session()
         self._statuses.clear()
         self._records.clear()
-        self._eligible.clear()
         self._ready.clear()
         self._discovered.clear()
         self._bound = False
@@ -350,7 +299,6 @@ class Client:
                 )
             logger.info("Controller disconnected controller=%s", self.controller_host)
             self._bound = False
-            self._eligible.clear()
             self._publish_snapshot()
             self._ready.set()
             writer.close()
@@ -361,7 +309,7 @@ class Client:
             await self._notify()
 
     async def _initialize(self) -> None:
-        """After metadata: read the controller GUID, bind storage, resume owned runs."""
+        """After metadata: read the controller GUID, let the sink accept it, resend history."""
         await asyncio.wait_for(self._discovered.wait(), 30)
         async with self._operation:
             reply = await self._exchange(
@@ -370,54 +318,33 @@ class Client:
                 reply_unit=None,
             )
             serial = msg.ControllerSerial.from_payload(self._payload(reply))
-            await asyncio.to_thread(self.store.bind, serial.guid)
-            saved = await asyncio.to_thread(self.store.runs)
-            self._runs = {run.address: run for run in saved}
-            for run in saved:
-                self._charge_ranges[run.address] = await asyncio.to_thread(
-                    self.store.charge_range, run.id
-                )
-            await self._notify_records()
+            await self.history.bind(serial.guid)
             self._bound = True
             logger.info(
-                "Controller ready controller=%s serial=%s channels=%d retained_runs=%d",
+                "Controller ready controller=%s serial=%s channels=%d",
                 self.controller_host,
                 serial.serial_number,
                 len(self.channels),
-                len(saved),
             )
             for status in tuple(self._statuses.values()):
-                await self._reconcile(status)
-            for run in self._runs.values():
-                if run.state == RunState.FINISHED:
-                    self._schedule_export(run.id)
+                self._reconcile(status)
             self._ready.set()
             self._publish_snapshot()
             await self._notify()
         await self._recover_history()
 
     async def _recover_history(self) -> None:
-        """After (re)connecting, resend history from the checkpoint, as the manufacturer
+        """After (re)connecting, resend history from the sink's checkpoint, as the manufacturer
         server does.
 
         The controller resumes after the last batch it *sent*; batches in flight when the
         connection dropped are skipped unless the host asks for them (observed).
         """
-        checkpoint = await asyncio.to_thread(self.store.checkpoint)
-        if checkpoint is None or not self._runs:
-            return
-        try:  # eligibility needs every owned channel's first status
-            async with asyncio.timeout(self.maximum_status_age), self._updated:
-                while any(address not in self._statuses for address in self._runs):
-                    await self._updated.wait()
-        except TimeoutError:
-            logger.warning(
-                "History recovery skipped controller=%s: owned channels did not report",
-                self.controller_host,
-            )
+        checkpoint = await self.history.checkpoint()
+        if checkpoint is None:
             return
         async with self._operation:
-            if not self.connected or not self._eligible:
+            if not self.connected:
                 return
             logger.info(
                 "History recovery controller=%s checkpoint=%#x", self.controller_host, checkpoint
@@ -434,22 +361,15 @@ class Client:
         if self._closed:
             return
         self._closed = True
-        async with self._records_changed:
-            self._records_changed.notify_all()
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
         if self._peer_task is not None:
             self._peer_task.cancel()
             await asyncio.gather(self._peer_task, return_exceptions=True)
-        tasks = tuple(self._exports.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
         self._bound = False
         self._publish_snapshot()
         await self._notify()
-        await asyncio.to_thread(self.store.close)
 
     # ------------------------------------------------------------------ #
     # Frames in and out
@@ -624,13 +544,13 @@ class Client:
             self._statuses[address] = status
             self._records[address] = record
             if self._bound:
-                await self._reconcile(status)
+                self._reconcile(status)
         self._publish_snapshot()
 
     async def _receive_history(self, frame: Frame) -> None:
-        """Store owned records durably, then ACK. Unbound or unreconciled batches are not ACKed."""
+        """Let the sink commit the batch durably, then ACK. Batches before binding are not ACKed."""
         batch = msg.HistoryBatch.from_payload(frame.payload)
-        if not self._bound or any(address not in self._statuses for address in self._runs):
+        if not self._bound:
             return  # not ACKed: the controller resends it later
         if self._resume_token is not None:
             if not self._resume_acknowledged:
@@ -647,19 +567,7 @@ class Client:
                     self._resume_token,
                     self.controller_host,
                 )
-        for record in batch.records:
-            run = self._runs.get(ChannelAddress(record.unit, record.channel))
-            if (
-                run is not None
-                and run.id in self._eligible
-                and run.test_id == record.test_id
-                and run.state == RunState.FINISHED
-            ):
-                self._schedule_export(run.id)
-        changed = await asyncio.to_thread(self.store.append, batch, tuple(self._eligible))
-        if changed:
-            await self._notify_records(changed)
-        await asyncio.to_thread(self.store.save_checkpoint, batch.token)
+        await self.history.commit(batch)
         await self._send(frame.answer(msg.HistoryBatch.ack_payload(batch.token), unit=0))
         self._track_position(batch)
         if self._resume_token is not None:
@@ -692,60 +600,18 @@ class Client:
                 self.controller_host,
             )
 
-    async def _reconcile(self, status: ChannelStatus) -> None:
-        run = self._runs.get(status.address)
-        if run is None:
+    def _reconcile(self, status: ChannelStatus) -> None:
+        """Confirm a start once the channel reports its new TestID after the start completed."""
+        awaiting = self._awaiting.get(status.address)
+        if awaiting is None or status.test_id != awaiting.test_id:
             return
-        if status.test_id != run.test_id:
-            if status.address in self._starting:
-                return
-            self._eligible.discard(run.id)
-            if run.state != RunState.INTERRUPTED:
-                logger.warning(
-                    "Run identity changed channel=%s run_id=%s owned_test_id=%d "
-                    "observed_test_id=%d; recording interrupted",
-                    status.address,
-                    run.id,
-                    run.test_id,
-                    status.test_id,
-                )
-                await asyncio.to_thread(self.store.set_state, run.id, RunState.INTERRUPTED)
-                self._runs[status.address] = await asyncio.to_thread(self.store.get, run.id)
+        if status.address in self._starting:
+            # Armed by Start but not yet confirmed: the channel still reports its idle state
+            # with the new TestID, which says nothing about the test. Frames are handled in
+            # arrival order, so every status sent before the controller confirmed is handled
+            # while still starting.
             return
-        self._eligible.add(run.id)
-        self._awaiting.pop(status.address, None)
-        if status.state == ChannelState.FINISHED and run.state != RunState.FINISHED:
-            await asyncio.to_thread(self.store.set_state, run.id, RunState.FINISHED)
-            self._runs[status.address] = await asyncio.to_thread(self.store.get, run.id)
-            self._schedule_export(run.id)
-
-    def _schedule_export(self, run_id: str) -> None:
-        self._dirty_exports.add(run_id)
-        if run_id not in self._exports:
-            self._exports[run_id] = asyncio.create_task(self._export_finished(run_id))
-
-    async def _export_finished(self, run_id: str) -> None:
-        """Finalize after `history_grace_period_s` without new history for the run."""
-        try:
-            while run_id in self._dirty_exports:
-                self._dirty_exports.discard(run_id)
-                await asyncio.sleep(self.history_grace_period_s)
-                if run_id in self._dirty_exports:
-                    continue
-                conversion = asyncio.create_task(asyncio.to_thread(self.store.finalize, run_id))
-                try:
-                    await asyncio.shield(conversion)
-                except asyncio.CancelledError:
-                    await conversion  # let the publishing thread finish before closing
-                    raise
-                except PendingRecordTime:
-                    logger.debug("BDF export awaits adjacent history for %s", run_id)
-        except Exception as error:
-            self._error = error
-            logger.exception("Automatic BDF export failed run_id=%s", run_id)
-        finally:
-            self._dirty_exports.discard(run_id)
-            self._exports.pop(run_id, None)
+        del self._awaiting[status.address]
 
     # ------------------------------------------------------------------ #
     # Preconditions
@@ -767,9 +633,7 @@ class Client:
         return status
 
     def check_start(self, profile: ChannelProfile) -> None:
-        """Check start preconditions without changing data or sending anything."""
-        if profile.address in self.exporting_channels:
-            raise StateError("final export in progress: waiting for late history or writing BDF")
+        """Check start preconditions without sending anything."""
         if profile.address in self._awaiting:
             raise StateError("channel start is awaiting status confirmation")
         if any(p.physical_id == profile.physical_id for p in self._awaiting.values()):
@@ -781,11 +645,11 @@ class Client:
         for address, other in self._statuses.items():
             if address == profile.address or other.state == ChannelState.FINISHED:
                 continue
-            run = self._runs.get(address)
+            test = self._tests.get(address)
             configured = self._configured.get(address)
             physical = (
-                run.physical_id
-                if run is not None and run.test_id == other.test_id
+                test.physical_id
+                if test is not None and test.test_id == other.test_id
                 else configured.physical_id
                 if configured is not None
                 else None
@@ -814,7 +678,7 @@ class Client:
         if not self.connected:
             raise ConnectionLost("no ready controller session")
         if self._error is not None:
-            raise StateError("resolve the recorder error before controller operations")
+            raise StateError("resolve the session error before controller operations")
 
     # ------------------------------------------------------------------ #
     # Starting tests
@@ -824,29 +688,28 @@ class Client:
         recipe: Recipe,
         profile: ChannelProfile,
         *,
-        run_id: str | None = None,
         on_attempt: Callable[[], Awaitable[None]] | None = None,
-    ) -> Run:
+    ) -> StartedTest:
         """Start one channel. See start_many."""
-        runs = await self.start_many(
-            recipe, (profile,), run_ids=None if run_id is None else (run_id,), on_attempt=on_attempt
-        )
-        return runs[0]
+        (test,) = await self.start_many(recipe, (profile,), on_attempt=on_attempt)
+        return test
 
     async def start_many(
         self,
         recipe: Recipe,
         profiles: tuple[ChannelProfile, ...],
         *,
-        run_ids: tuple[str, ...] | None = None,
         on_attempt: Callable[[], Awaitable[None]] | None = None,
-    ) -> tuple[Run, ...]:
+    ) -> tuple[StartedTest, ...]:
         """Start channels of one unit with one identical program.
 
         Sequence (all replies checked before the next step): channel map, aux init, program
         download, per-test protections, global protections, Start (arms channels and assigns
-        TestIDs), StartConfirm (starts them). Returned runs carry the acknowledged TestIDs;
-        confirming the running state from status uploads is the caller's responsibility.
+        TestIDs), StartConfirm (starts them). The assigned TestIDs reach the history sink in
+        the Start reply, before any of their history can arrive, and are returned in input
+        order; confirming the running state from status uploads is the caller's
+        responsibility. `on_attempt` runs once, after the readiness checks and before the
+        first write, for durable application bookkeeping; it must not call this client.
         """
         if not profiles or len({p.address for p in profiles}) != len(profiles):
             raise ValueError("batch requires distinct channel addresses")
@@ -854,13 +717,6 @@ class Client:
             raise ValueError("a masked start requires channels in the same unit")
         if len({p.physical_id for p in profiles}) != len(profiles):
             raise StateError("batch channels must have distinct physical mappings")
-        ids: tuple[str | None, ...] = (
-            (None,) * len(profiles)
-            if run_ids is None
-            else tuple(UUID(value).hex for value in run_ids)
-        )
-        if len(ids) != len(profiles) or (run_ids is not None and len(set(ids)) != len(ids)):
-            raise ValueError("batch requires one unique run ID per channel")
         programs = await asyncio.gather(*(asyncio.to_thread(recipe.compile, p) for p in profiles))
         if any(program.native != programs[0].native for program in programs[1:]):
             raise ValueError("masked starts require identical compiled programs")
@@ -874,30 +730,28 @@ class Client:
             if on_attempt is not None:
                 await on_attempt()
             for profile in profiles:
-                await self._discard_data(profile.address)
+                self._awaiting.pop(profile.address, None)
             self._starting = {p.address for p in profiles}
             sent: list[bool] = []  # appended to before the first frame goes out
             try:
-                runs = await self._start_sequence(
-                    recipe, programs[0].native, programs[0].step_count, profiles, ids, check, sent
+                tests = await self._start_sequence(
+                    programs[0].native, programs[0].step_count, profiles, check, sent
                 )
                 logger.info(
-                    "Native start acknowledged channel=%s run_id=%s test_id=%s",
+                    "Native start acknowledged channel=%s test_id=%s",
                     profiles[0].address,
-                    tuple(r.id for r in runs),
-                    tuple(r.test_id for r in runs),
+                    tuple(t.test_id for t in tests),
                 )
-                return runs
+                return tests
             except BaseException as error:
                 logger.warning(
-                    "Native start failed channel=%s run_id=%s error=%s",
+                    "Native start failed channel=%s error=%s",
                     profiles[0].address,
-                    ids,
                     type(error).__name__,
                 )
                 if isinstance(error, OperationRejected):
                     for profile in profiles:
-                        await self._discard_data(profile.address)
+                        self._awaiting.pop(profile.address, None)
                 if sent:
                     self._disconnect()
                 if not sent or isinstance(
@@ -912,14 +766,12 @@ class Client:
 
     async def _start_sequence(
         self,
-        recipe: Recipe,
         program: bytes,
         step_count: int,
         profiles: tuple[ChannelProfile, ...],
-        ids: tuple[str | None, ...],
         check: Callable[[], None],
         sent: list[bool],
-    ) -> tuple[Run, ...]:
+    ) -> tuple[StartedTest, ...]:
         session = self._session
         unit = profiles[0].address.unit
         guid = uuid4().bytes_le
@@ -985,10 +837,10 @@ class Client:
             "SetGrobalProtect82",
         )
 
-        runs: list[Run] = []
+        tests: list[StartedTest] = []
 
-        async def record_runs(reply: Frame) -> None:
-            # Runs exist before any status of the new TestID can be processed.
+        async def register_tests(reply: Frame) -> None:
+            # The sink knows the TestIDs before any later frame (status or history) is read.
             if reply.result:
                 return
             started = msg.StartReply.from_payload(reply.payload, reply.result)
@@ -998,24 +850,29 @@ class Client:
             ):
                 raise ProtocolError("Start reply does not match the requested channels")
             assigned = {(c.unit, c.channel): c.test_id for c in started.channels}
-            for profile, run_id in zip(profiles, ids, strict=True):
-                run = await asyncio.to_thread(
-                    self.store.begin,
-                    profile,
+            now = time.time_ns()
+            started_tests = tuple(
+                StartedTest(
+                    profile.address,
                     assigned[profile.address.unit, profile.address.channel],
-                    recipe.xml,
-                    run_id,
+                    profile.physical_id,
+                    profile.charge_range_raw,
+                    now,
                 )
-                runs.append(run)
-                self._runs[profile.address] = run
-                self._awaiting[profile.address] = profile
-                self._charge_ranges[profile.address] = profile.charge_range_raw
-                self._eligible.add(run.id)
-            await self._notify_records()
+                for profile in profiles
+            )
+            await self.history.register(started_tests)
+            for test in started_tests:
+                tests.append(test)
+                self._tests[test.address] = test
+                self._awaiting[test.address] = test
+                self._charge_ranges[test.address] = test.charge_range_raw
 
-        await exchange(Extended.START, msg.Start(guid, targets).to_payload(), on_reply=record_runs)
+        await exchange(
+            Extended.START, msg.Start(guid, targets).to_payload(), on_reply=register_tests
+        )
         assigned = tuple(
-            msg.ChannelTestId(r.address.unit, r.address.channel, r.test_id) for r in runs
+            msg.ChannelTestId(t.address.unit, t.address.channel, t.test_id) for t in tests
         )
         confirm = msg.ConfirmStartReply.from_payload(
             await self._payload_after(
@@ -1027,7 +884,7 @@ class Client:
         failed = [c for c in confirm.channels if c.result]
         if failed:
             raise OperationRejected(f"StartConfirm rejected channels: {failed}")
-        return tuple(runs)
+        return tuple(tests)
 
     async def _payload_after(self, command: int, payload: bytes, unit: int) -> bytes:
         """Exchange without re-checking start preconditions (the channel is now armed)."""
@@ -1040,25 +897,6 @@ class Client:
     def _payload_empty(payload: bytes, what: str) -> None:
         if payload:
             raise ProtocolError(f"{what} reply has an unexpected payload")
-
-    async def _discard_data(self, address: ChannelAddress) -> None:
-        self._awaiting.pop(address, None)
-        previous = self._runs.pop(address, None)
-        if previous is not None:
-            task = self._exports.get(previous.id)
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-            self._eligible.discard(previous.id)
-            self._dirty_exports.discard(previous.id)
-        self._charge_ranges.pop(address, None)
-        await asyncio.to_thread(self.store.clear, address)
-        await self._notify_records()
-
-    async def discard_data(self, address: ChannelAddress) -> None:
-        """Discard retained data and ownership; this does not stop a physical measurement."""
-        async with self._operation:
-            await self._discard_data(address)
 
     # ------------------------------------------------------------------ #
     # Channel control
@@ -1234,9 +1072,9 @@ class Client:
     # History recovery
     # ------------------------------------------------------------------ #
     async def resume_history(self, *, index: int | None = None) -> None:
-        """Ask the controller to resend history from the saved token (or `index`).
+        """Ask the controller to resend history from the sink's checkpoint (or `index`).
 
-        The client already does this from the saved token after every (re)connect; call it
+        The client already does this from the checkpoint after every (re)connect; call it
         to resend from an independently established position. The token is used as is: the
         controller resends that batch again and duplicates are dropped by sequence. The first
         accepted batch must carry the token; otherwise the session is closed. No retries.
@@ -1247,16 +1085,14 @@ class Client:
         async with self._operation:
             if not self.connected:
                 raise ConnectionLost("no ready controller")
-            if not self._eligible:
-                raise StateError("a matching library-started run is required first")
-            selected = await asyncio.to_thread(self.store.checkpoint) if index is None else index
+            selected = await self.history.checkpoint() if index is None else index
             if selected is None:
                 raise StateError("no saved history token; supply an index")
             bounded_integer("history index", selected, 2**32 - 1)
             await self._resend(selected, strict=True)
 
     async def _resend(self, token: int, *, strict: bool) -> None:
-        """Send SetReSendDfData and wait until the first resent batch is stored. Holds no lock
+        """Send SetReSendDfData and wait until the first resent batch is committed. Holds no lock
         itself; callers hold `_operation`.
 
         `strict` accepts only a batch at `token` and closes the session otherwise. Automatic
@@ -1430,7 +1266,7 @@ class Client:
         async with self._operation:
             self._check_idle()
             known = [s.test_id for s in self._statuses.values()]
-            known += [run.test_id for run in await asyncio.to_thread(self.store.runs)]
+            known += [test.test_id for test in self._tests.values()]
             if known and seed < max(known):
                 raise ValueError("seed is below a known TestID")
             logger.info("Explicit TestID initialization seed=%d source=%s", seed, source)
@@ -1440,22 +1276,6 @@ class Client:
                 self._disconnect()
                 raise OperationUncertain("reported TestID differs from the requested seed")
             return reported
-
-    # ------------------------------------------------------------------ #
-    # Recorded data
-    # ------------------------------------------------------------------ #
-    async def runs(self) -> tuple[Run, ...]:
-        return await asyncio.to_thread(self.store.runs)
-
-    async def read(
-        self, run: Run, *, after_sequence: int = 0, limit: int = 4096
-    ) -> tuple[RecordedPoint, ...]:
-        return await asyncio.to_thread(
-            self.store.read, run.id, after_sequence=after_sequence, limit=limit
-        )
-
-    async def export(self, run: Run, path: str | Path | None = None) -> Export:
-        return await asyncio.to_thread(self.store.export, run.id, path)
 
 
 def _controller_version(payload: bytes) -> str:

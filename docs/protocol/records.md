@@ -32,8 +32,8 @@ always 1 on our controller and ignored by the manufacturer server; its meaning i
 ## History: extended `0015`
 
 Controller → host, unit `FE`. Payload: `count:u8`, `token:u32`, then `count` 94-byte records.
-The host ACKs with `FF 00 15 80`, unit 0, carrying the token. The library stores records
-durably before it ACKs; an unacknowledged batch is sent again later.
+The host ACKs with `FF 00 15 80`, unit 0, carrying the token. The library ACKs only after
+the application's sink committed the batch; an unacknowledged batch is sent again later.
 
 The token is the controller's read position before the batch's first record. Positions
 advance 94 bytes per record: every consecutive pair of distinct batches in our captures is

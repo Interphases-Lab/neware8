@@ -87,3 +87,33 @@ class CounterTotals:
         self.previous_occurrence = occurrence
         self.previous_sequence = record.sequence
         return {name: float(value) if value is not None else None for name, value in values.items()}
+
+
+TEST_TOTALS = tuple(COUNTERS)
+"""The whole-test totals `RunningTotals` reports for paged reads."""
+
+
+class RunningTotals:
+    """Whole-test totals and the step-execution count, resumable at any record."""
+
+    def __init__(self, charge_range: int | None) -> None:
+        self.counters = CounterTotals(charge_range)
+        self.sequence = 0
+        self.step_count = 0
+        self.failed = False
+
+    def update(self, record: HistoryRecord) -> tuple[dict[str, float | None], int]:
+        """Advance to `record`; return its test totals and observed step count."""
+        occurrence = (record.cycle, record.step_id, record.step_change_count)
+        if occurrence != self.counters.previous_occurrence:
+            self.step_count += 1
+        self.sequence = record.sequence
+        values: dict[str, float | None] = {}
+        if not self.failed:
+            try:
+                values = self.counters.update(record)
+            except ValueError:  # the current scale cannot be resolved for this run
+                self.failed = True
+        if self.failed:
+            return dict.fromkeys(TEST_TOTALS), self.step_count
+        return {name: values[name] for name in TEST_TOTALS}, self.step_count

@@ -17,11 +17,12 @@ from neware8 import (
     ProtocolError,
     Recipe,
     StateError,
+    StorageError,
 )
 from neware8.messages import HISTORY_FILE_SHIFT
 from neware8.protocol import Extended, Frame, Short
 from fake_controller import FakeController, HistoryLog
-from helpers import PROFILE, XML
+from helpers import PROFILE, XML, MemorySink
 
 ADDRESS = PROFILE.address
 
@@ -31,10 +32,9 @@ async def connected(tmp_path, **options):
     client = Client(
         host="127.0.0.1",
         controller_host="127.0.0.1",
-        storage_directory=tmp_path,
+        history=MemorySink(),
         port=0,
         upload_interval_raw=1,
-        history_grace_period_s=60,
     )
     await client.listen()
     fake = FakeController(client.listening_port, **options)
@@ -62,7 +62,7 @@ def run(coroutine):
     asyncio.run(coroutine)
 
 
-def test_connect_discovers_channels_and_binds_storage(tmp_path):
+def test_connect_discovers_channels_and_binds_the_sink(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
             assert client.connected
@@ -70,6 +70,7 @@ def test_connect_discovers_channels_and_binds_storage(tmp_path):
             status = client.snapshot.get(ADDRESS)
             assert status.state == ChannelState.FINISHED and status.voltage_v == 3.6
             assert status.current_a == pytest.approx(-0.001)
+            assert client.history.controller == bytes(range(16))
 
     run(check())
 
@@ -92,19 +93,19 @@ def test_start_follows_the_manufacturer_sequence(tmp_path):
             assert started.test_id == fake.channels[1, 1].test_id
             assert fake.program == Recipe(XML).compile(PROFILE).native
             await wait_state(client, ChannelState.RUNNING)
-            assert (await client.runs())[0].test_id == started.test_id
+            assert list(client.history.tests.values()) == [started]
             with pytest.raises(StateError, match="finished channel"):
                 client.check_start(PROFILE)
 
     run(check())
 
 
-def test_rejected_start_leaves_no_run(tmp_path):
+def test_rejected_start_registers_no_test(tmp_path):
     async def check():
         async with connected(tmp_path, reject={(True, Extended.START): 1}) as (client, fake):
             with pytest.raises(OperationRejected):
                 await client.start(Recipe(XML), PROFILE)
-            assert await client.runs() == ()
+            assert client.history.tests == {}
             assert not fake.channels[1, 1].armed
 
     run(check())
@@ -161,7 +162,7 @@ def test_rejected_stop_with_empty_reply(tmp_path):
     run(check())
 
 
-def test_history_is_stored_before_it_is_acknowledged(tmp_path):
+def test_history_is_committed_before_it_is_acknowledged(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, fake):
             started = await client.start(Recipe(XML), PROFILE)
@@ -177,10 +178,22 @@ def test_history_is_stored_before_it_is_acknowledged(tmp_path):
             async with asyncio.timeout(5):
                 while 77 not in fake.acks:
                     await asyncio.sleep(0.01)
-            points = await client.read(started)
+            points = client.history.points(started)
             assert [p.sequence for p in points] == [1, 2]
             assert points[0].voltage_volt == 3.6
-            assert client.store.checkpoint() == 77
+            assert await client.history.checkpoint() == 77
+
+    run(check())
+
+
+def test_refused_commit_is_never_acknowledged(tmp_path):
+    async def check():
+        async with connected(tmp_path) as (client, fake):
+            client.history.refuse = StorageError("disk full")
+            fake.history(77, [fake.history_record(1, 1, 1)])
+            await until(lambda: not client.connected)
+            assert 77 not in fake.acks
+            assert isinstance(client.error, StorageError)
 
     run(check())
 
@@ -229,8 +242,8 @@ async def reconnect(client, first, log=None):
     return second
 
 
-async def sequences(client, run):
-    return [point.sequence for point in await client.read(run)]
+async def sequences(client, test):
+    return client.history.sequences(test)
 
 
 def test_resume_history_waits_for_the_requested_batch(tmp_path):
@@ -289,11 +302,10 @@ def test_reconnect_resends_history_lost_in_flight(tmp_path):
     run(check())
 
 
-def test_reconnect_without_owned_runs_sends_no_resend(tmp_path):
+def test_reconnect_without_a_checkpoint_sends_no_resend(tmp_path):
     async def check():
         async with connected(tmp_path) as (client, first):
-            first.history(first.log.token(0), [first.history_record(1, 1, 1, test_id=9)])
-            await until(lambda: first.acks)
+            assert await client.history.checkpoint() is None
             second = await reconnect(client, first)
             try:
                 await asyncio.sleep(0.2)
@@ -357,9 +369,7 @@ def test_unsolicited_reply_ends_the_session(tmp_path):
 
 def test_other_hosts_are_refused(tmp_path):
     async def check():
-        client = Client(
-            host="127.0.0.1", controller_host="192.0.2.1", storage_directory=tmp_path, port=0
-        )
+        client = Client(host="127.0.0.1", controller_host="192.0.2.1", history=MemorySink(), port=0)
         await client.listen()
         fake = FakeController(client.listening_port)
         await fake.connect()
@@ -376,7 +386,7 @@ def test_silent_controller_is_dropped_so_it_can_reconnect(tmp_path):
         client = Client(
             host="127.0.0.1",
             controller_host="127.0.0.1",
-            storage_directory=tmp_path,
+            history=MemorySink(),
             port=0,
             receive_timeout_s=0.3,
         )

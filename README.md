@@ -1,6 +1,8 @@
 # py-neware8
 
-An asyncio library for communicating directly with a Neware BTS82 controller.
+An asyncio driver for communicating directly with a Neware BTS82 controller. It handles the
+native session, programs and controls, and delivers history to the application, which owns
+the measurement data.
 The distribution is `py-neware8`; the import is `neware8`. Python 3.11 or later is
 required.
 
@@ -13,8 +15,8 @@ configuration:** ten units of eight channels, rated 5 V / 10 mA, using native TC
 port 8001 and a current scale of 10000. Compatibility with other models,
 firmware versions, ranges or configurations has not been established. These
 values describe the tested installation; they are not package defaults. The
-automated tests cover protocol decoding, storage and export using controlled
-input data. Not every exposed operation has been exercised on hardware.
+automated tests cover protocol decoding, history delivery and decoding using
+controlled input data. Not every exposed operation has been exercised on hardware.
 
 The controller initiates the TCP connection to the library's listener. Configure
 its host endpoint using the established site procedure before using this package.
@@ -36,7 +38,7 @@ Run development commands through uv:
 
 ```shell
 uv run --locked pytest
-uv run --locked mypy
+uv run --locked ty check
 uv run --locked ruff check .
 uv run --locked ruff format --check src tests
 uv build
@@ -55,35 +57,28 @@ The addresses and ratings below are arguments supplied by your application. A
 physical ID is controller-wide; it is not the logical channel number. Use the
 installation's established mapping. Compilation is offline and sends nothing.
 
+The application provides a `HistorySink` that stores history durably; the client
+acknowledges a batch to the controller only after the sink committed it (see
+[History](docs/history.md)).
+
 ```python
 from pathlib import Path
-from neware8 import ChannelProfile, ChannelState, Client, Recipe
+from neware8 import ChannelProfile, ChannelState, Client, HistorySink, Recipe
 
 
 async def start_measurement(
-    local_ip: str,
-    controller_ip: str,
-    profile: ChannelProfile,
-    xml_path: Path,
-    data_directory: Path,
+    local_ip: str, controller_ip: str, profile: ChannelProfile, xml_path: Path, sink: HistorySink
 ) -> None:
     recipe = Recipe.from_file(xml_path)
     compiled = recipe.compile(profile)
     print(compiled.step_count, compiled.maximum_duration_s)
 
-    async with Client(
-        host=local_ip,
-        controller_host=controller_ip,
-        storage_directory=data_directory,
-    ) as client:
+    async with Client(host=local_ip, controller_host=controller_ip, history=sink) as client:
         await client.wait_ready()
-        run = await client.start(recipe, profile)
-        print(run.id, run.test_id)
+        test = await client.start(recipe, profile)  # the sink registered test.test_id
         status = await client.wait_status(profile.address)
-        while status.test_id != run.test_id or status.state != ChannelState.FINISHED:
+        while status.test_id != test.test_id or status.state != ChannelState.FINISHED:
             status = await client.wait_status(profile.address, after_ns=status.received_at_ns)
-        result = await client.export(run)
-        print(result.path, result.missing_sequence_ranges)
 ```
 
 Construct a `ChannelProfile` with `address`, `physical_id`, `voltage_rating_v`,
@@ -99,41 +94,36 @@ the connection closes and the write is never automatically replayed.
 
 ## Data ownership
 
-Live statuses for all observed main channels are cached in memory. Recorded
-measurements are stored only for runs started by the library. External runs are
-observable and controllable by channel, but their data is not recorded.
-
+Live statuses for all observed main channels are cached in memory.
 `client.snapshot` returns the current immutable whole-controller status snapshot
 without copying. `await client.wait_snapshot(after_revision=...)` waits for an
 update and coalesces intermediate revisions for slow consumers.
 
-SQLite stores the current run of each channel, including its original XML and
-raw history records while recording. Finished measurements are converted in a
-background task after `history_grace_period_s` (default 30 seconds) without new
-history. The final Parquet contains only BDF columns, without native bytes.
-After durable publication, reads and exports use Parquet and
-main and auxiliary record rows are deleted from SQLite. After compilation and readiness checks succeed, a new start
-attempt clears that channel's working data and all BDF files created through the
-library before its first device write, including custom export paths. Rejected
-starts leave no previous run data. Other channels are unaffected. Finished runs remain readable until
-replacement. Late history is accepted during the grace period; history
-received after finalization fails explicitly without modifying the archive.
+neware8 stores no measurement data. Every history batch goes to the application's
+`HistorySink`, which keeps what it needs, typically the main records of the tests it
+started, and the resend position. The client tells the sink each TestID it is assigned
+before any of that test's history can arrive. Tests started elsewhere are observable
+and controllable by channel; whether their history is kept is the sink's choice.
 
-On reconnect, a fresh controller identity and matching channel TestID are
-required before recording resumes. Stored writes are never replayed. History is
-requested again from the saved stream token after every connect, so batches in flight
-during a drop are recovered; `resume_history()` does this explicitly. The controller's
-retention limits and final completeness remain unknown.
+`neware8.history` decodes stored records into engineering units, with the device's
+step-boundary time quirk resolved and capacity and energy accumulated from its per-step
+counters. It also lists the established mapping to the Battery Data Format.
+
+On reconnect, a fresh controller identity is handed to the sink before history is
+handled. Writes are never replayed. History is requested again from the sink's
+checkpoint after every connect, so batches in flight during a drop are recovered;
+`resume_history()` does this explicitly. The controller's retention limits and final
+completeness remain unknown.
 
 ## Documentation
 
 - [API and lifecycle](docs/api.md)
 - [Controller information and settings](docs/controller.md)
 - [Architecture and concurrency](docs/architecture.md)
-- [Storage, BDF mapping and retention](docs/storage.md)
+- [History: delivery, decoding and BDF mapping](docs/history.md)
 - [Protocol specification](docs/protocol/README.md)
 - [Corrections and open questions](docs/protocol/evidence.md)
-- [Validation](docs/testing.md)
+- [Validation and the simulated controller](docs/testing.md)
 
 The supported XML subset includes protected CC/CV/CCCV charge/discharge, rest,
 finite cycles and End. Unsupported XML settings fail explicitly. Auxiliary
@@ -144,10 +134,9 @@ and calibration operations are not public APIs.
 
 The library uses standard Python logging and does not configure application output.
 Configure `logging.basicConfig` in your application and set the `neware8` logger to
-INFO for connection, channel-state, control, ownership and export events, or DEBUG
-for exchanges, start phases and history batch ranges. Failures include context such
-as controller address, channel, run ID and TestID where available; unexpected session
-and recorder failures include tracebacks. Repeated unchanged statuses are not logged
+INFO for connection, channel-state and control events, or DEBUG for exchanges, start
+phases and history batch ranges. Failures include context such as controller address,
+channel and TestID where available; unexpected session failures include tracebacks. Repeated unchanged statuses are not logged
 at INFO.
 
 Raw packets are separately opt-in: set `logging.getLogger("neware8.wire").level`

@@ -11,11 +11,14 @@ import zlib
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import IntEnum
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from .protocol import ProtocolError, channel_mask, mask_channels
 
-T = TypeVar("T")
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
+
+T = TypeVar("T", bound="DataclassInstance")
 MAX_FRAGMENT = 4096  # CPacket_SetStep82 buffer
 FRAGMENT_TARGET = 1000  # whole step records per download frame, as the manufacturer client
 
@@ -32,7 +35,7 @@ def _need_at_least(payload: bytes, size: int, what: str) -> None:
 
 def _unpack(cls: type[T], layout: struct.Struct, raw: bytes) -> T:
     """Fill a record dataclass from a struct whose items are its fields in order, plus `raw`."""
-    names = [f.name for f in fields(cls) if f.name != "raw"]  # type: ignore[arg-type]
+    names = [f.name for f in fields(cls) if f.name != "raw"]
     values = dict(zip(names, layout.unpack(raw), strict=True), raw=raw)
     return cls(**values)
 

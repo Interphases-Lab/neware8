@@ -37,8 +37,8 @@ sample, or keeping only the final step's value, would give an incorrect result.
 
 The observed behavior is limited to the tested installation and ordinary
 recorded steps. Missing endpoints, negative values or unexpected within-step
-counter resets cannot be replaced by guessed totals. BDF exports mark affected
-optional quantities null and recalculate when missing history arrives.
+counter resets cannot be replaced by guessed totals. Decoded totals mark affected
+quantities unknown (None) and recover when recomputed after missing history arrives.
 Schedule-specific assignment/reset semantics remain unmapped. These mappings
 apply to main measurement records, not live alarm-detail slots or opaque history
 record variants.

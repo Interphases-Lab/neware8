@@ -3,13 +3,11 @@ import json
 import struct
 from types import SimpleNamespace
 
-import pyarrow.parquet as pq
 import pytest
 
-from neware8 import MeasurementStore
-from neware8._counters import CounterTotals
-from helpers import FIXTURES, PROFILE, history_payload
-from helpers import batch as batch_of
+from neware8.history import CounterTotals, RunningTotals
+from neware8.messages import HistoryRecord
+from helpers import FIXTURES, history_payload
 
 
 def record(sequence, step, counters, *, cycle=0, raw_range=-10, change=None):
@@ -63,6 +61,7 @@ def test_each_record_uses_its_range_including_automatic_range_changes():
     same = totals.update(record(2, 1, (1000, 0, 2000, 0), raw_range=-5))
     assert first == same
     last = totals.update(record(3, 1, (2000, 0, 4000, 0), raw_range=-5))
+    assert first["charging_capacity_ah"] is not None
     assert last["charging_capacity_ah"] == 2 * first["charging_capacity_ah"]
     with pytest.raises(ValueError, match="explicit channel range"):
         CounterTotals(None).update(record(1, 1, (0, 0, 0, 0), raw_range=0))
@@ -114,74 +113,52 @@ EXPECTED = {
 
 
 @pytest.mark.parametrize("name", EXPECTED)
-def test_captured_counter_resets_and_totals_export_after_reopen(tmp_path, name):
+def test_captured_counter_resets_and_totals(name):
     fixture = json.loads((FIXTURES / "counters.json").read_text())
     data = next(item for item in fixture["datasets"] if item["name"] == name)
-    records = [bytes.fromhex(raw) for raw in data["records"]]
-    store = MeasurementStore(tmp_path)
-    store.bind(bytes(range(16)))
-    run = store.begin(PROFILE, 1, None)
-    for offset in range(0, len(records), 100):
-        batch = records[offset : offset + 100]
-        store.append(batch_of(bytes([len(batch)]) + bytes(4) + b"".join(batch)), (run.id,))
-    store.close()
-    store = MeasurementStore(tmp_path)
-    try:
-        table = pq.read_table(store.export(run.id).path)
-        assert table.num_rows == len(records)
-        scale, charge, discharge, charge_energy, discharge_energy = EXPECTED[name]
-        last = table.to_pylist()[-1]
-        for column, value in (
-            ("charging_capacity_ah", charge),
-            ("discharging_capacity_ah", discharge),
-            ("charging_energy_wh", charge_energy),
-            ("discharging_energy_wh", discharge_energy),
-        ):
-            assert last[column] == float(Fraction(value, scale * 3_600_000))
-        for row in table.to_pylist():
-            for prefix in ("step_", "cycle_", ""):
-                for kind, unit in (("capacity", "ah"), ("energy", "wh")):
-                    charging = row[f"{prefix}charging_{kind}_{unit}"]
-                    discharging = row[f"{prefix}discharging_{kind}_{unit}"]
-                    assert row[f"{prefix}cumulative_{kind}_{unit}"] == pytest.approx(
-                        charging + discharging
-                    )
-                    assert row[f"{prefix}net_{kind}_{unit}"] == pytest.approx(
-                        charging - discharging
-                    )
-        if name == "cycling":
-            assert last["cycle_charging_capacity_ah"] == float(Fraction(653750656, 360_000_000_000))
-            assert last["cycle_discharging_capacity_ah"] == float(
-                Fraction(720066496, 360_000_000_000)
-            )
-    finally:
-        store.close()
+    records = [HistoryRecord.from_bytes(bytes.fromhex(raw)) for raw in data["records"]]
+    totals = CounterTotals(None)
+    rows = [totals.update(record) for record in records]
+    scale, charge, discharge, charge_energy, discharge_energy = EXPECTED[name]
+    last = rows[-1]
+    for column, value in (
+        ("charging_capacity_ah", charge),
+        ("discharging_capacity_ah", discharge),
+        ("charging_energy_wh", charge_energy),
+        ("discharging_energy_wh", discharge_energy),
+    ):
+        assert last[column] == float(Fraction(value, scale * 3_600_000))
+    for row in rows:
+        for prefix in ("step_", "cycle_", ""):
+            for kind, unit in (("capacity", "ah"), ("energy", "wh")):
+                charging = row[f"{prefix}charging_{kind}_{unit}"]
+                discharging = row[f"{prefix}discharging_{kind}_{unit}"]
+                assert charging is not None and discharging is not None
+                assert row[f"{prefix}cumulative_{kind}_{unit}"] == pytest.approx(
+                    charging + discharging
+                )
+                assert row[f"{prefix}net_{kind}_{unit}"] == pytest.approx(charging - discharging)
+    if name == "cycling":
+        assert last["cycle_charging_capacity_ah"] == float(Fraction(653750656, 360_000_000_000))
+        assert last["cycle_discharging_capacity_ah"] == float(Fraction(720066496, 360_000_000_000))
+    # The whole-test totals of paged reads agree with the full accumulation.
+    running = RunningTotals(None)
+    values = [running.update(record)[0] for record in records][-1]
+    assert values["charging_capacity_ah"] == last["charging_capacity_ah"]
 
 
-def test_late_history_restores_totals_and_parquet_batch_does_not_reset_them(tmp_path):
-    store = MeasurementStore(tmp_path)
-    store.bind(bytes(range(16)))
-    run = store.begin(PROFILE, 1, None)
-
-    def append(sequence):
+def test_filled_gap_restores_totals_when_recomputed():
+    def at(sequence):
         raw = bytearray(history_payload(sequence=sequence, time_ms=sequence * 1000)[5:])
         struct.pack_into("<qqqq", raw, 43, sequence * 100, 0, sequence * 300, 0)
         struct.pack_into("<i", raw, 82, -10)
-        store.append(batch_of(b"\x01" + bytes(4) + raw), (run.id,))
+        return HistoryRecord.from_bytes(bytes(raw))
 
-    try:
-        append(1)
-        append(3)
-        partial = pq.read_table(store.export(run.id).path)
-        assert partial["charging_capacity_ah"].to_pylist()[-1] is None
-        assert partial["step_charging_capacity_ah"].to_pylist()[-1] is not None
-        append(2)
-        for sequence in range(4, 4098):
-            append(sequence)
-        complete = pq.read_table(store.export(run.id).path)
-        assert complete["charging_capacity_ah"].null_count == 0
-        assert complete["charging_capacity_ah"].to_pylist()[-1] == pytest.approx(
-            409700 / 36_000_000_000
-        )
-    finally:
-        store.close()
+    partial = CounterTotals(None)
+    rows = [partial.update(at(sequence)) for sequence in (1, 3)]
+    assert rows[-1]["charging_capacity_ah"] is None
+    assert rows[-1]["step_charging_capacity_ah"] is not None
+    complete = CounterTotals(None)
+    rows = [complete.update(at(sequence)) for sequence in range(1, 4098)]
+    assert all(row["charging_capacity_ah"] is not None for row in rows)
+    assert rows[-1]["charging_capacity_ah"] == pytest.approx(409700 / 36_000_000_000)

@@ -1,8 +1,9 @@
-"""Native Neware BTS82 communication, XML programs and BDF measurement recording."""
+"""Native Neware BTS82 communication: the controller session, XML programs and history decoding."""
 
 from .alarms import AlarmInfo, alarm_info
 from .controller import ControllerInfo, UnitInfo
 from .client import Client
+from .history import HistorySink, StartedTest
 from .errors import (
     ConnectionLost,
     NewareError,
@@ -18,18 +19,11 @@ from .models import (
     ChannelState,
     ChannelStatus,
     Control,
-    DataCompleteness,
-    Export,
     RecordedPoint,
-    RecordChange,
-    RecordRevision,
-    Run,
-    RunState,
     StatusSnapshot,
     StepType,
 )
 from .recipe import CompiledRecipe, Recipe
-from .storage import MeasurementStore
 
 __all__ = [
     "AlarmInfo",
@@ -44,20 +38,15 @@ __all__ = [
     "CompiledRecipe",
     "ConnectionLost",
     "Control",
-    "DataCompleteness",
-    "Export",
-    "MeasurementStore",
+    "HistorySink",
     "NewareError",
     "OperationRejected",
     "OperationUncertain",
     "ProtocolError",
     "Recipe",
     "RecordedPoint",
-    "RecordChange",
-    "RecordRevision",
-    "Run",
-    "RunState",
     "StateError",
+    "StartedTest",
     "StatusSnapshot",
     "StepType",
     "StorageError",
