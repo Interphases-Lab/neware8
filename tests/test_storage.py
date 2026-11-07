@@ -279,7 +279,7 @@ def test_totals_after_a_gap_are_unknown_and_archive_matches_live(store):
     gap = history_payload(sequence=6, step_id=2, step_change_count=2, time_ms=6000)
     store.append(batch(gap), (run.id,))
     live = store.read(run.id)
-    assert live[-1].step_count is None and live[-1].charging_capacity_ah is None
+    assert live[-1].step_count == 2 and live[-1].charging_capacity_ah is None
     store.set_state(run.id, RunState.FINISHED)
     store.finalize(run.id)
     archived = store.read(run.id)

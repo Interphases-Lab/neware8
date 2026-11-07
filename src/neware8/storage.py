@@ -431,9 +431,8 @@ class MeasurementStore:
         with pq.ParquetFile(path) as parquet:
             index = parquet.schema_arrow.get_field_index("record_index")
             groups: list[int] = []
-            # Step executions and contiguity of the skipped leading groups, counted vectorized.
-            step_count: int | None = 0
-            previous_sequence = 0
+            # Step executions observed in the skipped leading groups, counted vectorized.
+            step_count = 0
             for group in range(parquet.num_row_groups):
                 metadata = parquet.metadata.row_group(group)
                 if not metadata.num_rows:
@@ -445,21 +444,13 @@ class MeasurementStore:
                     groups.append(group)
                     continue
                 table = parquet.read_row_group(group, columns=["step_record_index"])
-                first, last = statistics.min, statistics.max
-                if first != previous_sequence + 1 or last - first + 1 != table.num_rows:
-                    step_count = None
-                elif step_count is not None:
-                    starts = pc.sum(pc.equal(table["step_record_index"], 1)).as_py()
-                    step_count += int(starts or 0)
-                previous_sequence = last
+                starts = pc.sum(pc.equal(table["step_record_index"], 1)).as_py()
+                step_count += int(starts or 0)
             for batch in parquet.iter_batches(batch_size=4096, columns=columns, row_groups=groups):
                 for item in batch.to_pylist():
                     sequence = item["record_index"]
-                    if sequence != previous_sequence + 1:
-                        step_count = None
-                    elif step_count is not None and item["step_record_index"] == 1:
+                    if item["step_record_index"] == 1:
                         step_count += 1
-                    previous_sequence = sequence
                     if sequence <= after_sequence:
                         continue
                     points.append(

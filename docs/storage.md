@@ -130,7 +130,7 @@ recalculates from the SQLite snapshot, so filling a history gap restores totals.
 The API's recorded-point pages carry the whole-test totals (`charging_capacity_ah`,
 `discharging_capacity_ah`, `charging_energy_wh`, `discharging_energy_wh`) and the number of
 step executions observed (`step_count`), with the same accumulation and the same
-unknown-after-a-gap rule as the export. Pages of a live run keep a small in-memory cache of
+unknown-after-a-gap rule as the export; after a gap `step_count` is a lower bound. Pages of a live run keep a small in-memory cache of
 resumable positions, so continuing from the last returned sequence does not recompute the
 run from its first record; late history that fills a gap drops the cache. Pages of a
 finalized run read the totals from the archive. Step and cycle totals, and the derived net

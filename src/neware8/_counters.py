@@ -99,17 +99,13 @@ class RunningTotals:
     def __init__(self, charge_range: int | None) -> None:
         self.counters = CounterTotals(charge_range)
         self.sequence = 0
-        self.step_count: int | None = 0
+        self.step_count = 0
         self.failed = False
 
-    def update(self, record: HistoryRecord) -> tuple[dict[str, float | None], int | None]:
-        """Advance to `record`; return its test totals and step count."""
-        contiguous = record.sequence == self.sequence + 1
+    def update(self, record: HistoryRecord) -> tuple[dict[str, float | None], int]:
+        """Advance to `record`; return its test totals and observed step count."""
         occurrence = (record.cycle, record.step_id, record.step_change_count)
-        new_step = occurrence != self.counters.previous_occurrence
-        if not contiguous:
-            self.step_count = None
-        elif new_step and self.step_count is not None:
+        if occurrence != self.counters.previous_occurrence:
             self.step_count += 1
         self.sequence = record.sequence
         values: dict[str, float | None] = {}
