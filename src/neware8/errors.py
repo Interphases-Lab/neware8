@@ -26,4 +26,4 @@ class StateError(NewareError):
 
 
 class StorageError(NewareError):
-    """Data could not be durably recorded or interpreted for export."""
+    """History could not be stored by the sink or decoded."""

@@ -1,9 +1,8 @@
-"""Immutable addresses, channel observations and measurement identities."""
+"""Immutable addresses, channel profiles, observations and decoded records."""
 
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 import math
-from pathlib import Path
 import time
 
 
@@ -62,17 +61,6 @@ class StepType(IntEnum):
     CPCV_CHARGE = 27
     CRCV_DISCHARGE = 28
     CRCV_CHARGE = 29
-
-
-class RunState(StrEnum):
-    RECORDING = "recording"
-    FINISHED = "finished"
-    INTERRUPTED = "interrupted"
-
-
-class DataCompleteness(StrEnum):
-    UNKNOWN = "unknown"
-    GAPS = "gaps"
 
 
 class Control(StrEnum):
@@ -159,34 +147,14 @@ class StatusSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class Run:
-    id: str
-    address: ChannelAddress
-    test_id: int
-    state: RunState
-    physical_id: int
-    started_at_ns: int
-    record_count: int
-    completeness: DataCompleteness
-
-
-@dataclass(frozen=True, slots=True)
-class Export:
-    path: Path
-    run: Run
-    record_count: int
-    missing_sequence_ranges: tuple[tuple[int, int], ...]
-
-
-@dataclass(frozen=True, slots=True)
 class RecordedPoint:
-    """One recorded main-channel sample.
+    """One decoded main-channel history record (see `neware8.history.decode`).
 
-    The totals accumulate the device's step counters since the test started, as in the BDF
-    export (see docs/storage.md). They are None when unknown: after a sequence gap or a missing
-    test beginning, or when the current scale cannot be resolved. `step_count` is the number of
-    step executions observed since the test started, including the current one; a sequence gap
-    can hide step changes, so after one it is a lower bound.
+    The totals accumulate the device's step counters since the test started; they are set
+    only when decoding with `RunningTotals`, and None when unknown: after a sequence gap or a
+    missing test beginning, or when the current scale cannot be resolved. `step_count` is the
+    number of step executions observed since the test started, including the current one; a
+    sequence gap can hide step changes, so after one it is a lower bound.
     """
 
     sequence: int
@@ -201,17 +169,3 @@ class RecordedPoint:
     charging_energy_wh: float | None = None
     discharging_energy_wh: float | None = None
     step_count: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class RecordChange:
-    run_id: str
-    first_sequence: int
-    last_sequence: int
-    backfill: bool
-
-
-@dataclass(frozen=True, slots=True)
-class RecordRevision:
-    revision: int
-    reset_revision: int

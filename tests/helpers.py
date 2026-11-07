@@ -2,8 +2,9 @@ import json
 import struct
 from pathlib import Path
 
-from neware8 import ChannelAddress, ChannelProfile
-from neware8.messages import HistoryBatch
+from neware8 import ChannelAddress, ChannelProfile, StorageError
+from neware8.history import RunningTotals, decode, is_main
+from neware8.messages import HistoryBatch, HistoryRecord
 from neware8.protocol import Frame
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -62,3 +63,57 @@ def history_payload(
 
 def batch(payload: bytes) -> HistoryBatch:
     return HistoryBatch.from_payload(payload)
+
+
+class MemorySink:
+    """An in-memory `HistorySink`: keeps the main records of registered tests, by sequence."""
+
+    def __init__(self):
+        self.controller = None
+        self.tests = {}  # (unit, channel, test_id) -> StartedTest
+        self.records = {}  # (unit, channel, test_id) -> {sequence: raw}
+        self.token = None
+        self.refuse = None  # an exception to raise from commit
+
+    async def bind(self, controller):
+        if self.controller is not None and self.controller != controller:
+            raise StorageError("history belongs to another controller")
+        self.controller = controller
+
+    async def register(self, tests):
+        for test in tests:
+            key = (test.address.unit, test.address.channel, test.test_id)
+            self.tests[key] = test
+            self.records.setdefault(key, {})
+
+    async def commit(self, batch):
+        if self.refuse is not None:
+            raise self.refuse
+        for record in batch.records:
+            key = (record.unit, record.channel, record.test_id)
+            if not is_main(record) or key not in self.tests:
+                continue
+            stored = self.records[key].setdefault(record.sequence, record.raw)
+            if stored != record.raw:
+                raise StorageError(f"conflicting history at sequence {record.sequence}")
+        self.token = batch.token
+
+    async def checkpoint(self):
+        return self.token
+
+    def history(self, test):
+        """The stored records of a started test, in sequence order."""
+        stored = self.records.get((test.address.unit, test.address.channel, test.test_id), {})
+        return [HistoryRecord.from_bytes(stored[sequence]) for sequence in sorted(stored)]
+
+    def sequences(self, test):
+        return [record.sequence for record in self.history(test)]
+
+    def points(self, test, *, totals=True):
+        return list(
+            decode(
+                self.history(test),
+                charge_range=test.charge_range_raw,
+                totals=RunningTotals(test.charge_range_raw) if totals else None,
+            )
+        )

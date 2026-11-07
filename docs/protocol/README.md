@@ -50,7 +50,7 @@ initialises auxiliary inputs, extended `0039` is the status upload.
 |---|---|
 | Connect | Controller sends short `00`, body `client type:u8` (24 on BTS82) and `version:u16` (`0x011A`). Host replies `80`, same unit (`FE`), no body. |
 | Metadata | Controller sends short `72` (SendInfo), possibly in several parts; host ACKs each with `F2`, **unit 0**. See [commands](commands.md#sendinfo-metadata). |
-| Identity | The manufacturer server then reads the controller serial number (`002A`). This library binds its storage to the GUID in that reply. |
+| Identity | The manufacturer server then reads the controller serial number (`002A`). This library hands the GUID in that reply to the application's history sink. |
 | Status | Controller uploads `0039` per unit every *interval* seconds (settable, `5E`). No reply. |
 | History | Controller uploads `0015` batches; each needs an ACK carrying its token. Unacknowledged batches are resent. After every connect the host sends `0010` with its last token, because the controller skips batches that were in flight when the connection dropped ([records](records.md#history-extended-0015)). |
 | Heartbeat | Controller sends short `30`, empty, about every 17 s, also while status flows. No reply. |
@@ -103,7 +103,7 @@ decoded unless stated in [commands](commands.md).
 | `000D` | BonDiskStatus78 | ← | disk status | ignored |
 | `000F` | GetDfMinIndex | → | oldest resendable history position | `history_minimum_index` |
 | `0010` | SetReSendDfData | → | resend history from a position | after every connect; `resume_history` |
-| `0015` | SendDFData79 | ← | history batch, ACKed | stored, ACKed |
+| `0015` | SendDFData79 | ← | history batch, ACKed | committed by the sink, ACKed |
 | `0016`/`0017` | TestPing/TestNda | → | | — |
 | `0018`–`001A` | backup files | ↔ | file transfer | **forbidden** |
 | `001B`, `001E` | SetStep80, SetStart80 | → | BTS80 download and start; BTS82 uses `0036`/`003C` | — |
