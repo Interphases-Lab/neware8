@@ -410,10 +410,12 @@ class Client:
         self._closed = True
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
+        # The session goes before `wait_closed`, which (from Python 3.12) waits for the controller's connection to close.
         if self._peer_task is not None:
             self._peer_task.cancel()
             await asyncio.gather(self._peer_task, return_exceptions=True)
+        if self._server is not None:
+            await self._server.wait_closed()
         self._bound = False
         self._publish_snapshot()
         await self._notify()
